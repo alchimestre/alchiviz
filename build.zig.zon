@@ -1,0 +1,13 @@
+.{
+    .name = .alchiviz,
+    .version = "0.1.0",
+    .dependencies = .{
+        .dvui = .{
+            .url = "git+https://github.com/david-vanderson/dvui#e94e391c1600b8e8b5efca985e4e3cf515ed64da",
+            .hash = "dvui-0.6.0-dev-AQFJmac1BAGpCNPLcS4iJMnpgpFcRRWWqVyhBozYxPDa",
+        },
+    },
+    .minimum_zig_version = "0.17.0",
+    .paths = .{""},
+    .fingerprint = 0xeafc02fc5fde1e,
+}
