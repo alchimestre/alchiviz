@@ -1,8 +1,6 @@
 # alchiviz
 
-Real-time DMT tunnel fed by a live audio input. The capture is drawn as a
-waveform across the whole window, then folded by the same transform as
-alchimix's DMT mode.
+Real-time viz by a live audio input.
 
 ## Requirements
 
