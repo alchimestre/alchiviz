@@ -33,7 +33,7 @@ pub fn main(init: std.process.Init) !void {
 
 fn run(init: std.process.Init, device: ?[]const u8) !void {
     var app = try App.init(init.gpa, init.io, device);
-    defer app.deinit();
+    errdefer app.deinit();
 
     if (device) |needle| {
         if (app.devices.len > 0 and audio.find(app.devices, needle) == null) {
@@ -53,6 +53,9 @@ fn run(init: std.process.Init, device: ?[]const u8) !void {
         .title = "alchiviz",
     });
     defer backend.deinit();
+    // Registered after the backend so it runs before it: destroying the stream
+    // after SDL_Quit walks a freed audio device.
+    defer app.deinit();
 
     var window_open = true;
     var win = try dvui.Window.init(@src(), init.gpa, backend.backend(), .{

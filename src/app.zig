@@ -7,6 +7,9 @@ const dmt = @import("dmt.zig");
 const signal = @import("signal.zig");
 const wave = @import("wave.zig");
 
+/// Rings the loudness adds on top of the lanes slider.
+const ring_push: f32 = 2.2;
+
 const panel = dvui.Color{ .r = 0x14, .g = 0x14, .b = 0x1f, .a = 0xff };
 const ink = dvui.Color{ .r = 0xf8, .g = 0xf8, .b = 0xf2, .a = 0xff };
 const muted = dvui.Color{ .r = 0x8a, .g = 0x8a, .b = 0x9e, .a = 0xff };
@@ -29,6 +32,16 @@ pub const App = struct {
     now_ns: i96 = 0,
     last_sample_ns: i96 = 0,
     levels: signal.Levels = .{},
+
+    /// The DMT panel: the same seven values the mixer's DMT mode exposed.
+    effect_speed: f32 = 1,
+    window_wander_limit: f32 = 0.45,
+    virtual_scale: f32 = 1,
+    virtual_base: ?dvui.Size.Physical = null,
+    lane_rings: f32 = dmt.rings_default,
+    lane_mirrors: f32 = 4,
+    lane_colour: f32 = 0,
+    blur: f32 = 0,
 
     error_text: []u8 = &.{},
 
@@ -127,16 +140,28 @@ pub const App = struct {
         };
 
         const levels = self.levels;
-        const swell = 1 + levels.kick * dmt.window_pump;
-        dmt.draw(texture, arena, &self.fold_cache, self.clock, size, .{ .w = size.w * swell, .h = size.h * swell }, .{
-            .ring_count = dmt.rings_default + 2.2 * levels.level,
+        // The fold is laid out on the window it opened in, scaled by the window
+        // slider and breathing with the wander and the kick.
+        const swell = @max(0.2, 1 + dmt.wander(self.elapsed, self.window_wander_limit) + levels.kick * dmt.window_pump);
+        const canvas = dmt.virtualSize(self.windowBase(size), self.virtual_scale * swell);
+        dmt.draw(texture, arena, &self.fold_cache, self.clock, size, canvas, .{
+            .ring_count = std.math.clamp(self.lane_rings + ring_push * levels.level, dmt.rings_track.min, dmt.rings_track.max),
             .heart = levels.kick,
-            .mirrors = 4,
+            .mirrors = self.lane_mirrors,
         }) catch {
             self.setError("the fold could not be drawn");
         };
 
         self.controls();
+    }
+
+    /// The fold's own window: the size it had the first time a frame drew, so a
+    /// later resize reveals more of the tunnel instead of rescaling it.
+    fn windowBase(self: *App, size: dvui.Size.Physical) dvui.Size.Physical {
+        // A frame can report an empty rect before the first present; latching
+        // that would leave the fold on a zero canvas for the process lifetime.
+        if (self.virtual_base == null and size.w > 0 and size.h > 0) self.virtual_base = size;
+        return self.virtual_base orelse size;
     }
 
     fn controls(self: *App) void {
@@ -193,6 +218,62 @@ pub const App = struct {
                 .id_extra = 4,
             });
         }
+
+        dvui.labelNoFmt(@src(), "fold", .{}, .{
+            .font = .theme(.body),
+            .color_text = .{ .color = muted },
+            .id_extra = 6,
+        });
+
+        if (self.sliderRow("speed", dmt.speed_track.fraction(self.effect_speed), 10)) |fraction| {
+            self.effect_speed = dmt.speed_track.value(fraction);
+        }
+        if (self.sliderRow("wander", dmt.wander_track.fraction(self.window_wander_limit), 20)) |fraction| {
+            self.window_wander_limit = dmt.wander_track.value(fraction);
+        }
+        if (self.sliderRow("window", dmt.window_track.fraction(self.virtual_scale), 30)) |fraction| {
+            self.virtual_scale = dmt.window_track.value(fraction);
+        }
+        if (self.sliderRow("lanes", dmt.rings_track.fraction(self.lane_rings), 40)) |fraction| {
+            self.lane_rings = dmt.rings_track.value(fraction);
+        }
+        if (self.sliderRow("colour", self.lane_colour, 50)) |fraction| {
+            self.lane_colour = fraction;
+        }
+        if (self.sliderRow("blur", self.blur, 60)) |fraction| {
+            self.blur = fraction;
+        }
+        if (self.sliderRow("mirror", dmt.mirrors_track.fraction(self.lane_mirrors), 70)) |fraction| {
+            self.lane_mirrors = dmt.mirrors_track.value(fraction);
+        }
+    }
+
+    /// A label with a slider beside it. Returns the new position only when the
+    /// slider moved.
+    fn sliderRow(self: *App, text: []const u8, start: f32, id: u32) ?f32 {
+        _ = self;
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .id_extra = id,
+            .min_size_content = .{ .h = 22 },
+        });
+        defer row.deinit();
+
+        dvui.labelNoFmt(@src(), text, .{}, .{
+            .font = .theme(.body),
+            .color_text = .{ .color = ink },
+            .gravity_y = 0.5,
+            .min_size_content = .{ .w = 64 },
+            .id_extra = id + 1,
+        });
+
+        var fraction = start;
+        const moved = dvui.slider(@src(), .{ .fraction = &fraction }, .{
+            .gravity_y = 0.5,
+            .min_size_content = .{ .w = 160, .h = 14 },
+            .max_size_content = .{ .w = 160, .h = 14 },
+            .id_extra = id + 2,
+        });
+        return if (moved) fraction else null;
     }
 
     /// Move the clock with the capture and follow its loudness.
@@ -208,7 +289,7 @@ pub const App = struct {
         self.elapsed += step;
         // The tunnel keeps moving through silence; only its speed follows the
         // capture.
-        self.clock.advance(step * (0.6 + 1.4 * self.levels.level), dmt.mood(self.elapsed));
+        self.clock.advance(step * self.effect_speed * (0.6 + 1.4 * self.levels.level), dmt.mood(self.elapsed));
 
         const ring = if (self.ring) |*value| value else return;
         const before = ring.pushes;
@@ -246,7 +327,7 @@ pub const App = struct {
         defer dvui.clipSet(dvui.currentWindow().rect_pixels);
 
         const ring = if (self.ring) |*value| value else return;
-        try wave.draw(arena, size, ring);
+        try wave.draw(arena, size, ring, dmt.chromaLevel(self.lane_colour), self.blur);
     }
 
     fn setError(self: *App, message: []const u8) void {
