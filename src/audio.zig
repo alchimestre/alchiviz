@@ -6,6 +6,7 @@
 const std = @import("std");
 const sdl = @import("sdl3-c");
 const signal = @import("signal.zig");
+const tap = @import("tap.zig");
 
 pub const sample_rate: u32 = 48000;
 
@@ -33,10 +34,13 @@ pub fn list(allocator: std.mem.Allocator) ![]Device {
     for (ids[0..@intCast(count)]) |id| {
         const raw = sdl.SDL_GetAudioDeviceName(id);
         const name: []const u8 = if (raw == null) "" else std.mem.span(raw);
+        // The system-output tap appears here as its own aggregate device. It
+        // is captured through `tap.zig`, so offering it twice would be a trap.
+        if (containsIgnoreCase(name, tap.aggregate_name)) continue;
         devices[built] = .{ .id = id, .name = try allocator.dupe(u8, name) };
         built += 1;
     }
-    return devices;
+    return try allocator.realloc(devices, built);
 }
 
 pub fn free(allocator: std.mem.Allocator, devices: []Device) void {
@@ -44,10 +48,11 @@ pub fn free(allocator: std.mem.Allocator, devices: []Device) void {
     allocator.free(devices);
 }
 
-/// The device the visualizer starts on: a system loopback when one is
-/// installed (eqMac, BlackHole, Loopback, Soundflower), otherwise the system's
-/// default recording device.
+/// The device the visualizer starts on: the system-output tap, then a system
+/// loopback when one is installed (eqMac, BlackHole, Loopback, Soundflower),
+/// otherwise the system's default recording device.
 pub fn preferred(devices: []const Device) usize {
+    if (find(devices, "alchiviz")) |index| return index;
     if (loopbackIndex(devices)) |index| return index;
 
     const default_name = sdl.SDL_GetAudioDeviceName(sdl.SDL_AUDIO_DEVICE_DEFAULT_RECORDING);

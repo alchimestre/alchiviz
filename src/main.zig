@@ -4,7 +4,11 @@ const std = @import("std");
 const dvui = @import("dvui");
 const SDLBackend = @import("sdl-backend");
 const audio = @import("audio.zig");
+const tap = @import("tap.zig");
 const App = @import("app.zig").App;
+
+/// One frame at 60 Hz, in microseconds.
+const frame_budget_us: u32 = 16_667;
 
 pub fn main(init: std.process.Init) !void {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
@@ -73,27 +77,38 @@ fn run(init: std.process.Init, device: ?[]const u8) !void {
         app.frame();
         const frame_end = try win.end(.{});
 
-        // The waveform moves every frame, so no wait goes past a frame's worth
-        // of time even when nothing is happening.
-        const wait = @min(win.waitTime(frame_end), 16_667);
+        // dvui has no animation to wait for, so this wait is what paces the
+        // waveform. It has to be the part of the frame budget the frame has
+        // not already spent: a full-frame wait on top of a 12 ms frame lands
+        // every frame after the vblank and half the frame rate is lost.
+        const now_ns: i128 = @intCast(std.Io.Clock.awake.now(init.io).nanoseconds);
+        const spent_us = std.math.clamp(@divTrunc(now_ns - frame_start, std.time.ns_per_us), 0, frame_budget_us);
+        const wait = @min(win.waitTime(frame_end), frame_budget_us - @as(u32, @intCast(spent_us)));
         interrupted = try backend.waitEventTimeout(wait);
     }
 }
 
 fn listDevices(init: std.process.Init) void {
+    // The tap is not an SDL device, so probing it is the only way the list can
+    // say whether the system output is capturable.
+    var system_tap = tap.start(init.io, init.gpa) catch |err| blk: {
+        std.debug.print("system output unavailable ({s})\n", .{@errorName(err)});
+        break :blk null;
+    };
+    defer if (system_tap) |*running| running.stop(init.gpa);
+
     const devices = audio.list(init.gpa) catch |err| {
         std.debug.print("cannot list recording devices: {s}\n", .{@errorName(err)});
         return;
     };
     defer audio.free(init.gpa, devices);
 
-    if (devices.len == 0) {
-        std.debug.print("no recording devices\n", .{});
-        return;
-    }
     const preferred = audio.preferred(devices);
+    if (system_tap != null) std.debug.print("* system output\n", .{});
+    if (devices.len == 0 and system_tap == null) std.debug.print("no recording devices\n", .{});
     for (devices, 0..) |listed, index| {
-        std.debug.print("{s}{s}\n", .{ if (index == preferred) "* " else "  ", listed.name });
+        const mark = if (system_tap == null and index == preferred) "* " else "  ";
+        std.debug.print("{s}{s}\n", .{ mark, listed.name });
     }
 }
 

@@ -5,6 +5,7 @@ const dvui = @import("dvui");
 const audio = @import("audio.zig");
 const dmt = @import("dmt.zig");
 const signal = @import("signal.zig");
+const tap = @import("tap.zig");
 const wave = @import("wave.zig");
 
 /// Rings the loudness adds on top of the lanes slider.
@@ -21,6 +22,13 @@ pub const App = struct {
     names: [][]const u8,
     selected: usize = 0,
     input: audio.Input = .{},
+    /// The system-output tap, when the machine allowed one. When it exists it
+    /// is the first entry in `names`, and it captures through its own device
+    /// rather than through `input`.
+    system_tap: ?tap.SystemTap = null,
+    /// Why the tap is missing, when it is: without this the panel silently
+    /// offers the microphone and the system output looks like a missing driver.
+    tap_failure: ?anyerror = null,
     ring: ?signal.Ring = null,
     open: bool = false,
 
@@ -46,6 +54,13 @@ pub const App = struct {
     error_text: []u8 = &.{},
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, requested: ?[]const u8) !App {
+        var tap_failure: ?anyerror = null;
+        var system_tap = tap.start(io, allocator) catch |err| blk: {
+            tap_failure = err;
+            break :blk null;
+        };
+        errdefer if (system_tap) |*running| running.stop(allocator);
+
         // A missing audio subsystem must not stop the window from opening: the
         // panel can report it, and the user can retry from there.
         var audio_failed = false;
@@ -55,12 +70,18 @@ pub const App = struct {
         };
         errdefer audio.free(allocator, devices);
 
-        const names = try allocator.alloc([]const u8, devices.len);
+        // The tap takes the first slot when it exists, so one index space
+        // covers "the system output" and the devices SDL lists.
+        const tap_slot: usize = if (system_tap != null) 1 else 0;
+        const names = try allocator.alloc([]const u8, devices.len + tap_slot);
         errdefer allocator.free(names);
-        for (devices, 0..) |device, index| names[index] = device.name;
+        if (tap_slot == 1) names[0] = "system output";
+        for (devices, 0..) |device, index| names[index + tap_slot] = device.name;
 
         const chosen = if (requested) |needle|
-            audio.find(devices, needle) orelse audio.preferred(devices)
+            if (audio.find(devices, needle)) |index| index + tap_slot else 0
+        else if (tap_slot == 1)
+            0
         else
             audio.preferred(devices);
 
@@ -70,19 +91,26 @@ pub const App = struct {
             .devices = devices,
             .names = names,
             .selected = chosen,
+            .system_tap = system_tap,
+            .tap_failure = tap_failure,
         };
+        system_tap = null;
 
         app.select(chosen);
         if (audio_failed) {
             app.setError("audio subsystem unavailable");
-        } else if (devices.len == 0) {
+        } else if (app.system_tap == null and devices.len == 0) {
             app.setError("no recording devices");
         }
         return app;
     }
 
     pub fn deinit(self: *App) void {
+        // The stream holds the aggregate device open; closing the tap first
+        // would leave it walking a destroyed device.
         self.input.close();
+        if (self.system_tap) |*running| running.stop(self.allocator);
+        self.system_tap = null;
         if (self.ring) |*ring| ring.deinit(self.allocator);
         self.fold_cache.deinit();
         if (self.wave_target) |target| target.destroyLater();
@@ -93,7 +121,7 @@ pub const App = struct {
 
     /// Open a device and start its history from empty.
     pub fn select(self: *App, index: usize) void {
-        if (index >= self.devices.len) return;
+        if (index >= self.names.len) return;
         self.selected = index;
         self.open = false;
 
@@ -103,12 +131,15 @@ pub const App = struct {
         self.ring = null;
         self.input.close();
 
-        self.input.open(self.devices[index].id) catch |err| {
-            self.setError(@errorName(err));
-            return;
+        const rate = if (self.onTap()) tap.sample_rate else blk: {
+            self.input.open(self.deviceAt(index).id) catch |err| {
+                self.setError(@errorName(err));
+                return;
+            };
+            break :blk self.input.rate;
         };
 
-        self.ring = signal.Ring.init(self.allocator, self.input.rate) catch |err| {
+        self.ring = signal.Ring.init(self.allocator, rate) catch |err| {
             self.input.close();
             self.setError(@errorName(err));
             return;
@@ -118,9 +149,19 @@ pub const App = struct {
         self.setError("");
     }
 
+    /// Whether the selected entry is the system-output tap.
+    fn onTap(self: *const App) bool {
+        return self.system_tap != null and self.selected == 0;
+    }
+
+    /// The SDL device behind an entry in `names`.
+    fn deviceAt(self: *const App, index: usize) audio.Device {
+        const tap_slot: usize = if (self.system_tap != null) 1 else 0;
+        return self.devices[index - tap_slot];
+    }
+
     pub fn frame(self: *App) void {
         self.pump();
-
         const rect = dvui.currentWindow().rect_pixels;
         const size = dvui.Size.Physical{ .w = rect.w, .h = rect.h };
         const arena = dvui.currentWindow().arena();
@@ -193,10 +234,20 @@ pub const App = struct {
             if (choice != self.selected) self.select(choice);
         }
 
+        if (self.tap_failure) |failure| {
+            dvui.label(@src(), "system output unavailable ({s})", .{@errorName(failure)}, .{
+                .font = .theme(.body),
+                .color_text = .{ .color = muted },
+                .id_extra = 5,
+            });
+        }
+
         if (self.open) {
+            const rate = if (self.onTap()) tap.sample_rate else self.input.rate;
+            const channels = if (self.onTap()) 1 else self.input.channels;
             dvui.label(@src(), "{d:.1} kHz  ·  {d} ch  ·  level {d:.2}", .{
-                self.input.rate / 1000,
-                self.input.channels,
+                rate / 1000,
+                channels,
                 self.levels.level,
             }, .{
                 .font = .theme(.body),
@@ -293,12 +344,16 @@ pub const App = struct {
 
         const ring = if (self.ring) |*value| value else return;
         const before = ring.pushes;
-        self.input.pull(ring);
+        if (self.system_tap) |*system| {
+            if (self.onTap()) system.pull(ring) else self.input.pull(ring);
+        } else {
+            self.input.pull(ring);
+        }
         if (ring.pushes != before) self.last_sample_ns = now;
 
         const samples = ring.newest();
         if (samples.len == 0) {
-            self.levels.silence();
+            self.levels.silence(@floatCast(step));
             return;
         }
 
@@ -306,7 +361,7 @@ pub const App = struct {
         const tail = @min(samples.len, count);
         const newest = signal.column(ring, samples.len - tail, samples.len, 0);
 
-        self.levels.update(newest);
+        self.levels.update(newest, @floatCast(step));
     }
 
     /// A loopback driver that stops feeding looks exactly like silence: the

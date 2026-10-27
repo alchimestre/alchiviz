@@ -69,5 +69,9 @@ pub fn build(b: *std.Build) void {
 fn linkSdl(b: *std.Build, mod: *std.Build.Module, prefix: []const u8) void {
     mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
     mod.linkSystemLibrary("SDL3", .{});
+    // The system-output tap is a CoreAudio object reached through Foundation.
+    mod.linkFramework("CoreAudio", .{});
+    mod.linkFramework("Foundation", .{});
+    mod.linkSystemLibrary("objc", .{});
     mod.link_libc = true;
 }
