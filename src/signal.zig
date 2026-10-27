@@ -6,8 +6,10 @@
 
 const std = @import("std");
 
-/// Seconds of capture the waveform shows across the window.
-pub const history_seconds: f32 = 6;
+/// Seconds of capture the waveform shows across the window. Short enough that
+/// the fold's oldest texel is still close to now: across a wider strip the eye
+/// reads the picture as lag.
+pub const history_seconds: f32 = 2;
 
 /// Edges of the rekordbox-style three-band split.
 const low_cutoff: f32 = 150;
@@ -166,23 +168,40 @@ pub const Levels = struct {
     low_average: f32 = 0,
     kick: f32 = 0,
 
-    pub fn update(self: *Levels, newest: Column) void {
-        self.reference = @max(newest.peak, self.reference * 0.9995);
-        const relative = @min(1, newest.peak / self.reference);
-        self.level = self.level * 0.75 + relative * 0.25;
+    /// Time constants in seconds. Per-frame factors would make every one of
+    /// them depend on the frame rate.
+    const level_seconds: f32 = 0.10;
+    const reference_seconds: f32 = 3;
+    const low_seconds: f32 = 0.7;
+    const kick_seconds: f32 = 0.35;
+    const silence_seconds: f32 = 0.28;
 
-        self.low_average = self.low_average * 0.96 + newest.low * 0.04;
+    /// `dt` is the frame time in seconds. The reference is a peak hold that
+    /// lets go in about three seconds: a longer one reads as the fold falling
+    /// asleep after the loud part of a track.
+    pub fn update(self: *Levels, newest: Column, dt: f32) void {
+        self.reference = @max(newest.peak, self.reference * retention(dt, reference_seconds));
+        const relative = @min(1, newest.peak / self.reference);
+        self.level += (relative - self.level) * (1 - retention(dt, level_seconds));
+
+        self.low_average += (newest.low - self.low_average) * (1 - retention(dt, low_seconds));
         const excess = @max(0, newest.low - self.low_average * 1.05);
-        self.kick = @max(self.kick * 0.92, @min(1, excess * 4));
+        self.kick = @max(self.kick * retention(dt, kick_seconds), @min(1, excess * 4));
     }
 
     /// No samples at all: let both settle instead of leaving the last hit on
     /// screen.
-    pub fn silence(self: *Levels) void {
-        self.level *= 0.9;
-        self.kick *= 0.9;
+    pub fn silence(self: *Levels, dt: f32) void {
+        const keep = retention(dt, silence_seconds);
+        self.level *= keep;
+        self.kick *= keep;
     }
 };
+
+/// What a one-pole filter with time constant `tau` still holds after `dt`.
+fn retention(dt: f32, tau: f32) f32 {
+    return @exp(-dt / tau);
+}
 
 fn mean(values: []const f32) f32 {
     if (values.len == 0) return 0;
@@ -282,29 +301,53 @@ test "a column takes its peak and its body from its span" {
 
 test "a low-band spike fires the kick and fades" {
     var levels: Levels = .{};
+    const dt: f32 = 1.0 / 60.0;
     const quiet = Column{ .peak = 0.2, .body = 0.1, .low = 0.2 };
     var step: usize = 0;
-    while (step < 200) : (step += 1) levels.update(quiet);
+    while (step < 200) : (step += 1) levels.update(quiet, dt);
     try std.testing.expect(levels.kick < 0.05);
 
-    levels.update(.{ .peak = 0.5, .body = 0.3, .low = 0.5 });
+    levels.update(.{ .peak = 0.5, .body = 0.3, .low = 0.5 }, dt);
     try std.testing.expect(levels.kick > 0.2);
 
     const fired = levels.kick;
     step = 0;
-    while (step < 20) : (step += 1) levels.update(quiet);
+    while (step < 20) : (step += 1) levels.update(quiet, dt);
     try std.testing.expect(levels.kick < fired);
 }
 
 test "the level follows the capture and settles in silence" {
     var levels: Levels = .{};
+    const dt: f32 = 1.0 / 60.0;
     var step: usize = 0;
-    while (step < 60) : (step += 1) levels.update(.{ .peak = 0.4, .body = 0.3, .low = 0.1 });
+    while (step < 60) : (step += 1) levels.update(.{ .peak = 0.4, .body = 0.3, .low = 0.1 }, dt);
     try std.testing.expect(levels.level > 0.8);
 
     step = 0;
-    while (step < 10) : (step += 1) levels.silence();
+    while (step < 20) : (step += 1) levels.silence(dt);
     try std.testing.expect(levels.level < 0.5);
+}
+
+test "the levels settle at the same rate whatever the frame rate" {
+    const loud = Column{ .peak = 0.5, .body = 0.3, .low = 0.4 };
+    const quiet = Column{ .peak = 0.05, .body = 0.02, .low = 0.02 };
+
+    var fast: Levels = .{};
+    var slow: Levels = .{};
+    // Two seconds of loud, then one second of quiet, at 120 and at 30 fps.
+    var step: usize = 0;
+    while (step < 240) : (step += 1) fast.update(loud, 1.0 / 120.0);
+    step = 0;
+    while (step < 60) : (step += 1) slow.update(loud, 1.0 / 30.0);
+    step = 0;
+    while (step < 120) : (step += 1) fast.update(quiet, 1.0 / 120.0);
+    step = 0;
+    while (step < 30) : (step += 1) slow.update(quiet, 1.0 / 30.0);
+
+    // A peak hold lets go on the same clock, not on the same number of frames.
+    try std.testing.expectApproxEqRel(fast.reference, slow.reference, 0.02);
+    try std.testing.expectApproxEqRel(fast.level, slow.level, 0.02);
+    try std.testing.expectApproxEqRel(fast.low_average, slow.low_average, 0.02);
 }
 
 test "bands split a low tone into low and a high tone into high" {

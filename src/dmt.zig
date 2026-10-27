@@ -236,9 +236,16 @@ pub fn fold(
     const angle = mirrorFold(turned, shape.mirrors);
     const around = @cos(angle);
     const across = @sin(angle);
-    const reach = half * band;
-    // Folding into one quadrant is what mirrors the frame.
-    const local = dvui.Point.Physical{ .x = @abs(around) * reach, .y = @abs(across) * reach };
+    // Time runs along x, so the texel has to reach the newest edge of the
+    // strip; reaching only half way from the centre kept the newest fifth of
+    // the history off screen, which reads as delay however fast the rest of
+    // the pipeline is. Both x signs are used: `wrap` reflects the far side
+    // back in, the same fold the mirroring relies on. y stays on one side,
+    // which halves the texels a frame touches.
+    const local = dvui.Point.Physical{
+        .x = around * (canvas.w / 2 * band),
+        .y = @abs(across) * (canvas.h / 2 * band),
+    };
 
     const source = dvui.Point.Physical{ .x = centre.x + local.x, .y = centre.y + local.y };
     return .{
@@ -638,3 +645,4 @@ test "the lane and mirror sliders change where the fold samples" {
         try std.testing.expect(moved > 100);
     }
 }
+
