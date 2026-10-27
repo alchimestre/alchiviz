@@ -56,8 +56,87 @@ const twist: f32 = 0.55;
 /// How far one kick swells the virtual window, as a fraction of its scale.
 pub const window_pump: f32 = 0.12;
 
-/// Effect speed against the wall clock.
+/// Effect speed against the wall clock. The speed slider scales the step the
+/// app feeds the clock, never this.
 const speed: f32 = 1.6;
+
+/// A slider's travel: the value range it edits, and the mapping between that
+/// value and the slider's 0..1 position.
+pub const Track = struct {
+    min: f32,
+    max: f32,
+    /// Equal slider moves are equal magnifications, so the middle of the travel
+    /// lands somewhere useful rather than hugging the small end.
+    geometric: bool = false,
+    /// Whole-number values only, for counts whose seams have to join.
+    whole: bool = false,
+
+    /// Where `held` sits on the slider.
+    pub fn fraction(self: Track, held: f32) f32 {
+        const inside = std.math.clamp(held, self.min, self.max);
+        if (self.geometric) return @log(inside / self.min) / @log(self.max / self.min);
+        return (inside - self.min) / (self.max - self.min);
+    }
+
+    /// The value at slider position `position`.
+    pub fn value(self: Track, position: f32) f32 {
+        const at = std.math.clamp(position, 0, 1);
+        if (self.geometric) return self.min * std.math.pow(f32, self.max / self.min, at);
+        const linear = self.min + at * (self.max - self.min);
+        return if (self.whole) @round(linear) else linear;
+    }
+};
+
+/// Slider tracks for the DMT panel. The mixer's DMT mode drove the same seven
+/// values, so a slider reads the same amount in either app.
+pub const speed_track: Track = .{ .min = 0.2, .max = 2 };
+
+/// 0 holds the window still; 1.2 is the widest swing.
+pub const wander_track: Track = .{ .min = 0, .max = 1.2 };
+
+/// The wander itself, as a fraction of the window scale to add to it. Goals are
+/// seeded from the time and joined by a smoothstep, so the tunnel breathes
+/// without a random walk to carry between frames.
+pub fn wander(time: f64, limit: f32) f32 {
+    const period: f64 = 5.5;
+    const steps = time / period;
+    const epoch: i64 = @intFromFloat(@floor(steps));
+    const within: f32 = @floatCast(steps - @floor(steps));
+    const eased = within * within * (3 - 2 * within);
+    const from = wanderGoal(epoch);
+    const to = wanderGoal(epoch + 1);
+    return limit * (from + (to - from) * eased);
+}
+
+/// A goal in [-1, 1), seeded from the wander's epoch.
+fn wanderGoal(epoch: i64) f32 {
+    const unit = @as(f64, @floatFromInt(seeded(epoch) >> 11)) / 9007199254740992;
+    return @floatCast(unit * 2 - 1);
+}
+
+/// The virtual window. Geometric, so equal moves are equal magnifications and
+/// the middle lands on exactly the real window.
+pub const window_track: Track = .{ .min = 1.0 / 3.0, .max = 3, .geometric = true };
+
+/// The window the fold is laid out on: the real window when DMT started,
+/// scaled.
+pub fn virtualSize(base: dvui.Size.Physical, scale: f32) dvui.Size.Physical {
+    return .{ .w = base.w * scale, .h = base.h * scale };
+}
+
+/// Lane count: few wide lanes at the bottom of the track, many thin ones at the
+/// top.
+pub const rings_track: Track = .{ .min = 0.9, .max = 7 };
+
+/// Kaleidoscope facets.
+pub const mirrors_track: Track = .{ .min = 2, .max = 16, .whole = true };
+
+/// What the colour slider means here: the waveform's band colours open up as
+/// it rises, the way the mixer's panel brought its coloured fills up. Nothing
+/// is dimmed, so more colour reads as more colour rather than less light.
+pub fn chromaLevel(colour: f32) f32 {
+    return 1 + 1.2 * std.math.clamp(colour, 0, 1);
+}
 
 /// Vertex every this many physical pixels. Mirror seams are sharp, so the grid
 /// has to be fine.
@@ -451,4 +530,111 @@ test "alternate rings are reflected so the picture mirrors outwards" {
     // The seam between two rings is continuous: both sides show the edge.
     try std.testing.expectApproxEqAbs(ringBand(0, 1), ringBand(1, 0), 0.0001);
     try std.testing.expectApproxEqAbs(ringBand(-1, 0.3), 0.7, 0.0001);
+}
+
+test "every slider track round-trips and clamps" {
+    const tracks = [_]Track{ speed_track, wander_track, window_track, rings_track, mirrors_track };
+
+    for (tracks) |track| {
+        for ([_]f32{ 0, 0.25, 0.5, 0.75, 1 }) |position| {
+            const held = track.value(position);
+            try std.testing.expect(held >= track.min and held <= track.max);
+            // A whole-number track can only land within half a step of where it
+            // was asked to go.
+            const tolerance: f32 = if (track.whole) 0.08 else 0.0001;
+            try std.testing.expectApproxEqAbs(position, track.fraction(held), tolerance);
+        }
+        try std.testing.expectApproxEqAbs(@as(f32, 0), track.fraction(track.min - 5), 0.0001);
+        try std.testing.expectApproxEqAbs(@as(f32, 1), track.fraction(track.max + 5), 0.0001);
+    }
+}
+
+test "the middle of the window slider is the real window" {
+    try std.testing.expectApproxEqAbs(@as(f32, 1), window_track.value(0.5), 0.0001);
+    const base = dvui.Size.Physical{ .w = 1280, .h = 800 };
+    const scaled = virtualSize(base, window_track.value(0.5));
+    try std.testing.expectApproxEqAbs(base.w, scaled.w, 0.001);
+    try std.testing.expectApproxEqAbs(base.h, scaled.h, 0.001);
+}
+
+test "the mirror track lands on whole facets inside the range" {
+    for ([_]f32{ 0, 0.1, 0.31, 0.62, 1 }) |position| {
+        const facets = mirrors_track.value(position);
+        try std.testing.expectEqual(facets, @round(facets));
+        try std.testing.expect(facets >= mirrors_track.min and facets <= mirrors_track.max);
+        try std.testing.expectApproxEqAbs(position, mirrors_track.fraction(facets), 0.08);
+    }
+}
+
+test "the wander stays inside its limit and never jumps at a seam" {
+    const limit: f32 = 0.45;
+    var time: f64 = 0;
+    while (time < 60) : (time += 0.05) {
+        const here = wander(time, limit);
+        try std.testing.expect(@abs(here) <= limit + 0.0001);
+        try std.testing.expectApproxEqAbs(here, wander(time, limit), 0.0001);
+    }
+
+    // Each period hands over to the next goal, so the breathing has no edge.
+    var edge: f64 = 5.5;
+    while (edge < 60) : (edge += 5.5) {
+        const before = wander(edge - 0.001, limit);
+        const after = wander(edge + 0.001, limit);
+        try std.testing.expect(@abs(before - after) < 0.002);
+    }
+}
+
+test "the wander reaches both ends of its travel" {
+    var lowest: f32 = 0;
+    var highest: f32 = 0;
+    var time: f64 = 0;
+    while (time < 400) : (time += 0.25) {
+        const here = wander(time, 1);
+        lowest = @min(lowest, here);
+        highest = @max(highest, here);
+    }
+    try std.testing.expect(lowest < -0.5);
+    try std.testing.expect(highest > 0.5);
+}
+
+test "the colour slider only ever adds colour" {
+    try std.testing.expectApproxEqAbs(@as(f32, 1), chromaLevel(0), 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.2), chromaLevel(1), 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.2), chromaLevel(9), 0.0001);
+
+    // Monotonic: every step to the right opens the colours further.
+    var previous = chromaLevel(0);
+    var step: f32 = 0.05;
+    while (step <= 1) : (step += 0.05) {
+        const level = chromaLevel(step);
+        try std.testing.expect(level >= previous);
+        previous = level;
+    }
+}
+
+test "the lane and mirror sliders change where the fold samples" {
+    const clock = Clock{ .rush = 2, .turn = 0.5 };
+    const cases = [_]FoldShape{
+        .{ .ring_count = rings_track.min },
+        .{ .ring_count = rings_track.max },
+        .{ .mirrors = mirrors_track.min },
+        .{ .mirrors = mirrors_track.max },
+    };
+
+    for (cases) |shape| {
+        var moved: f32 = 0;
+        for (0..6) |row| {
+            for (0..6) |column| {
+                const p = dvui.Point.Physical{
+                    .x = 100 + @as(f32, @floatFromInt(column)) * 180,
+                    .y = 80 + @as(f32, @floatFromInt(row)) * 110,
+                };
+                const base = fold(p, clock, framesize, framesize, .{});
+                const shown = fold(p, clock, framesize, framesize, shape);
+                moved += @abs(shown.x - base.x) + @abs(shown.y - base.y);
+            }
+        }
+        // Summed over a grid, so a single coincidental sample cannot pass it.
+        try std.testing.expect(moved > 100);
+    }
 }

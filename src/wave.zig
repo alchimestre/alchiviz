@@ -29,14 +29,36 @@ pub fn tint(level: f32, low: f32, mid: f32, high: f32) Color {
     };
 }
 
+/// Scale the distance between a tint and its own grey. 1 leaves the tint
+/// alone; above 1 opens the band colours up, below 1 washes them toward grey.
+pub fn chroma(colour: Color, amount: f32) Color {
+    if (colour.a == 0) return colour;
+    const luma = 0.299 * @as(f32, @floatFromInt(colour.r)) +
+        0.587 * @as(f32, @floatFromInt(colour.g)) +
+        0.114 * @as(f32, @floatFromInt(colour.b));
+    return .{
+        .r = push(colour.r, luma, amount),
+        .g = push(colour.g, luma, amount),
+        .b = push(colour.b, luma, amount),
+        .a = colour.a,
+    };
+}
+
+fn push(value: u8, luma: f32, amount: f32) u8 {
+    const opened = luma + (@as(f32, @floatFromInt(value)) - luma) * amount;
+    return @intFromFloat(std.math.clamp(opened, 0, 255));
+}
+
 /// Draw the capture across the window, newest at the right edge.
-pub fn draw(arena: std.mem.Allocator, size: dvui.Size.Physical, ring: *const signal.Ring) !void {
+pub fn draw(arena: std.mem.Allocator, size: dvui.Size.Physical, ring: *const signal.Ring, chroma_amount: f32, blur: f32) !void {
     if (size.w <= 0 or size.h <= 0) return;
 
     const columns: usize = @intFromFloat(@max(1, @ceil(size.w / step)));
     const stats = try arena.alloc(signal.Column, columns);
     fill(stats, ring);
     smooth(stats);
+    const scratch = try arena.alloc(signal.Column, stats.len);
+    soften(stats, scratch, blur);
     normalise(stats);
 
     const quads = columns * 2 + 1;
@@ -49,7 +71,7 @@ pub fn draw(arena: std.mem.Allocator, size: dvui.Size.Physical, ring: *const sig
         const left = size.w * @as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(columns));
         const right = size.w * @as(f32, @floatFromInt(index + 1)) / @as(f32, @floatFromInt(columns));
         const width = right - left;
-        const color = tint(stat.peak, stat.low, stat.mid, stat.high);
+        const color = chroma(tint(stat.peak, stat.low, stat.mid, stat.high), chroma_amount);
         if (color.a == 0) continue;
 
         const body_h = size.h * stat.body;
@@ -134,6 +156,42 @@ fn ambient(stats: []const signal.Column) Color {
     const colour = tint(0.35, low / count, mid / count, high / count);
     if (colour.a == 0) return background;
     return mix(background, colour, 0.22);
+}
+
+/// Columns the soften pass reaches across at full blur.
+const max_soften: usize = 24;
+
+/// Average the columns over a window that grows with the blur slider. The fold
+/// repeats this waveform, so fewer, softer bars read as a blurred tunnel
+/// without a second render target.
+fn soften(stats: []signal.Column, scratch: []signal.Column, blur: f32) void {
+    const radius: usize = @intFromFloat(@round(std.math.clamp(blur, 0, 1) * max_soften));
+    if (radius == 0 or stats.len == 0) return;
+
+    const source = scratch[0..stats.len];
+    @memcpy(source, stats);
+    const width = radius * 2 + 1;
+
+    for (stats, 0..) |*stat, index| {
+        var sum: signal.Column = .{};
+        for (0..width) |offset| {
+            const shifted = @as(isize, @intCast(index)) + @as(isize, @intCast(offset)) - @as(isize, @intCast(radius));
+            const at: usize = @intCast(std.math.clamp(shifted, 0, @as(isize, @intCast(stats.len - 1))));
+            sum.peak += source[at].peak;
+            sum.body += source[at].body;
+            sum.low += source[at].low;
+            sum.mid += source[at].mid;
+            sum.high += source[at].high;
+        }
+        const count: f32 = @floatFromInt(width);
+        stat.* = .{
+            .peak = sum.peak / count,
+            .body = sum.body / count,
+            .low = sum.low / count,
+            .mid = sum.mid / count,
+            .high = sum.high / count,
+        };
+    }
 }
 
 /// Weight each bar with its neighbours, so the outline reads as a shape rather
@@ -247,6 +305,51 @@ test "silence leaves the background alone" {
     try std.testing.expectEqual(background, ambient(&silent));
 }
 
+test "blur softens the columns and leaves them alone at zero" {
+    var stats: [64]signal.Column = undefined;
+    for (&stats, 0..) |*stat, index| {
+        stat.* = .{ .peak = if (index % 2 == 0) 1 else 0, .body = 0.5, .low = 0.2, .mid = 0.1, .high = 0.05 };
+    }
+    const before = stats;
+
+    var scratch: [64]signal.Column = undefined;
+    soften(&stats, &scratch, 0);
+    for (stats, before) |got, want| try std.testing.expectEqual(want.peak, got.peak);
+
+    soften(&stats, &scratch, 1);
+    // The one-column peak/trough pattern is averaged away; the body of the
+    // waveform survives, so the bars get soft rather than empty.
+    try std.testing.expect(stats[32].peak > 0.3 and stats[32].peak < 0.7);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), stats[32].body, 0.05);
+
+    var sum: f32 = 0;
+    for (stats) |stat| sum += stat.peak;
+    try std.testing.expectApproxEqAbs(@as(f32, 32), sum, 3);
+}
+
 test "silence draws nothing" {
     try std.testing.expectEqual(@as(u8, 0), tint(0, 0, 0, 0).a);
+}
+
+test "chroma opens a tint away from its grey and washes it back" {
+    const red = Color{ .r = 240, .g = 60, .b = 60 };
+
+    // Neutral amount changes nothing.
+    const same = chroma(red, 1);
+    try std.testing.expectEqual(red.r, same.r);
+    try std.testing.expectEqual(red.g, same.g);
+    try std.testing.expectEqual(red.b, same.b);
+
+    // Opening pushes the channels apart.
+    const opened = chroma(red, 1.5);
+    try std.testing.expect(opened.r >= red.r);
+    try std.testing.expect(opened.g <= red.g);
+
+    // Zero lands every channel on the luma, so the bar is grey.
+    const grey = chroma(red, 0);
+    try std.testing.expectEqual(grey.r, grey.g);
+    try std.testing.expectEqual(grey.g, grey.b);
+
+    // Transparent stays transparent: nothing to colour.
+    try std.testing.expectEqual(@as(u8, 0), chroma(.{ .r = 0, .g = 0, .b = 0, .a = 0 }, 2).a);
 }
