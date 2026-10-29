@@ -13,6 +13,9 @@ pub const history_seconds: f32 = 2;
 
 /// Edges of the rekordbox-style three-band split.
 const low_cutoff: f32 = 150;
+/// Floor of the low band. Without it the band's envelope, not its tone, is what
+/// a one-pole would hand back, and a gated hat is nothing but envelope.
+const low_floor_cutoff: f32 = 30;
 const mid_cutoff: f32 = 2000;
 
 /// Automatic gain control: a compressor with makeup, so a quiet microphone
@@ -56,8 +59,10 @@ pub const Ring = struct {
     pushes: u64 = 0,
     rate: f32,
     low_coef: f32,
+    low_floor_coef: f32,
     mid_coef: f32,
-    low_state: f32 = 0,
+    low_state: [low_stages]f32 = @splat(0),
+    low_floor_state: f32 = 0,
     mid_state: f32 = 0,
 
     pub fn init(allocator: std.mem.Allocator, rate: f32) !Ring {
@@ -82,6 +87,7 @@ pub const Ring = struct {
             .capacity = capacity,
             .rate = rate,
             .low_coef = onePoleCoefficient(low_cutoff, rate),
+            .low_floor_coef = onePoleCoefficient(low_floor_cutoff, rate),
             .mid_coef = onePoleCoefficient(mid_cutoff, rate),
         };
     }
@@ -99,7 +105,8 @@ pub const Ring = struct {
         self.head = 0;
         self.written = 0;
         self.pushes = 0;
-        self.low_state = 0;
+        self.low_state = @splat(0);
+        self.low_floor_state = 0;
         self.mid_state = 0;
     }
 
@@ -108,7 +115,11 @@ pub const Ring = struct {
         // reads them.
         const sample = if (std.math.isFinite(raw)) raw else 0;
 
-        const low = onePole(&self.low_state, sample, self.low_coef);
+        // Band-passed, then three poles down: a hat's tone sits far above the
+        // band and its envelope sits below it, and only a low-pass would hand
+        // the envelope straight back as though it were bass.
+        const above_floor = sample - onePole(&self.low_floor_state, sample, self.low_floor_coef);
+        const low = lowPass(&self.low_state, above_floor, self.low_coef);
         const mid_raw = onePole(&self.mid_state, sample, self.mid_coef);
 
         const at = self.head;
@@ -215,15 +226,17 @@ pub const Levels = struct {
         const relative = @min(1, newest.peak / self.reference);
         self.level += (relative - self.level) * (1 - retention(dt, level_seconds));
 
-        // The beat follows the low band, so a hat or a vocal cannot move the
-        // tunnel the way a bass note does.
+        // The beat follows the low band, and only while the low band is what
+        // the capture is mostly made of: a hat leaning into the band through
+        // the filter is not a bass note.
         self.low_reference = @max(newest.low, self.low_reference * retention(dt, reference_seconds));
         const low_relative = @min(1, newest.low / self.low_reference);
-        self.low_level += (low_relative - self.low_level) * (1 - retention(dt, level_seconds));
+        const heard = dominance(newest);
+        self.low_level += (low_relative * heard - self.low_level) * (1 - retention(dt, level_seconds));
 
         self.low_average += (newest.low - self.low_average) * (1 - retention(dt, low_seconds));
         const excess = @max(0, newest.low - self.low_average * 1.05);
-        self.kick = @max(self.kick * retention(dt, kick_seconds), @min(1, excess * 4));
+        self.kick = @max(self.kick * retention(dt, kick_seconds), @min(1, excess * 4) * heard);
     }
 
     /// No samples at all: let both settle instead of leaving the last hit on
@@ -235,6 +248,15 @@ pub const Levels = struct {
         self.kick *= keep;
     }
 };
+
+/// How much of the capture the low band is, faded in over the range where a
+/// bass note starts to be the thing you hear rather than a leak from above it.
+fn dominance(newest: Column) f32 {
+    const total = newest.low + newest.mid + newest.high;
+    const share = if (total > 0) newest.low / total else 0;
+    const eased = std.math.clamp((share - 0.15) / 0.2, 0, 1);
+    return eased * eased * (3 - 2 * eased);
+}
 
 /// What a one-pole filter with time constant `tau` still holds after `dt`.
 fn retention(dt: f32, tau: f32) f32 {
@@ -250,6 +272,17 @@ fn mean(values: []const f32) f32 {
 
 fn onePoleCoefficient(cutoff: f32, rate: f32) f32 {
     return @exp(-std.math.tau * cutoff / rate);
+}
+
+/// Poles in the low band's low-pass: 6 dB per octave each. Two is where a hat
+/// at 8 kHz lands under a thousandth of its level while a bass note keeps most
+/// of its own.
+const low_stages = 2;
+
+fn lowPass(states: *[low_stages]f32, input: f32, coefficient: f32) f32 {
+    var value = input;
+    for (states) |*state| value = onePole(state, value, coefficient);
+    return value;
 }
 
 fn onePole(state: *f32, input: f32, coefficient: f32) f32 {
@@ -379,6 +412,36 @@ test "a low-band spike fires the kick and fades" {
     step = 0;
     while (step < 20) : (step += 1) levels.update(quiet, dt);
     try std.testing.expect(levels.kick < fired);
+
+    // A crash of mids and highs is not a hit, however loud it is.
+    var treble: Levels = .{};
+    const crash = Column{ .peak = 1, .body = 0.9, .low = 0.1, .mid = 1, .high = 1 };
+    step = 0;
+    while (step < 120) : (step += 1) treble.update(crash, dt);
+    try std.testing.expect(treble.kick < 0.05);
+}
+
+test "a hat stays out of the band the beat rides" {
+    var ring = try Ring.init(std.testing.allocator, 48000);
+    defer ring.deinit(std.testing.allocator);
+
+    // An 8 kHz click train, loud and with no bass underneath.
+    var at: usize = 0;
+    while (at < 24000) : (at += 1) {
+        ring.push(if (at % 240 < 8) sine(48000, 8000, at) * 0.9 else 0);
+    }
+    const hats = column(&ring, 23200, 23999, 0);
+    try std.testing.expect(hats.low < hats.high * 0.2);
+
+    var bass_ring = try Ring.init(std.testing.allocator, 48000);
+    defer bass_ring.deinit(std.testing.allocator);
+    at = 0;
+    while (at < 24000) : (at += 1) {
+        bass_ring.push(if (at % 240 < 120) sine(48000, 60, at) * 0.9 else 0);
+    }
+    const bass = column(&bass_ring, 23200, 23999, 0);
+    try std.testing.expect(bass.low > 0.15);
+    try std.testing.expect(bass.low > bass.high * 5);
 }
 
 test "the beat's level drops when the bass does, however loud the rest is" {
@@ -401,6 +464,13 @@ test "the beat's level drops when the bass does, however loud the rest is" {
     step = 0;
     while (step < 40) : (step += 1) levels.update(grooving, dt);
     try std.testing.expect(levels.low_level > 0.8);
+
+    // A capture that is all mids and highs never lifts it, however steady.
+    var treble: Levels = .{};
+    const wall = Column{ .peak = 1, .body = 0.9, .mid = 1, .high = 0.4, .low = 0.02 };
+    step = 0;
+    while (step < 240) : (step += 1) treble.update(wall, dt);
+    try std.testing.expect(treble.low_level < 0.02);
 }
 
 test "the level follows the capture and settles in silence" {
