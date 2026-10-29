@@ -9,7 +9,6 @@ pub const Stage = enum {
     spin,
     mirrors,
     stagger,
-    twist,
     kick,
 
     pub fn label(self: Stage) []const u8 {
@@ -47,9 +46,6 @@ pub const Stage = enum {
                 "sweep per lane and wraps, so lanes three apart come back into line. Off makes " ++
                 "every lane sample the same band, which collapses the tunnel into one repeating " ++
                 "picture.",
-            .twist =>
-            "Shears the angle by the radius, so each facet spirals as it runs out from the " ++
-                "middle. Off leaves the facet edges radial, straight out from the centre.",
             .kick =>
             "Pushes the rings outward on each beat, scaled by the loudness the capture reports, " ++
                 "so a hit moves the whole tunnel a ring forward. Off keeps the expansion even " ++
@@ -68,7 +64,6 @@ pub const Toggles = struct {
     spin: bool = true,
     mirrors: bool = true,
     stagger: bool = true,
-    twist: bool = true,
     kick: bool = true,
 
     pub fn enabled(self: Toggles, stage: Stage) bool {
@@ -77,7 +72,6 @@ pub const Toggles = struct {
             .spin => self.spin,
             .mirrors => self.mirrors,
             .stagger => self.stagger,
-            .twist => self.twist,
             .kick => self.kick,
         };
     }
@@ -88,7 +82,6 @@ pub const Toggles = struct {
             .spin => self.spin = on,
             .mirrors => self.mirrors = on,
             .stagger => self.stagger = on,
-            .twist => self.twist = on,
             .kick => self.kick = on,
         }
     }
