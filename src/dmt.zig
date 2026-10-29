@@ -10,13 +10,44 @@
 const std = @import("std");
 const dvui = @import("dvui");
 const geom = @import("geom.zig");
+const stages = @import("stages.zig");
 
 /// Folds an angle into one wedge of a kaleidoscope with `mirrors` facets, so
 /// every facet shows the same slice of the frame reflected at its edges.
 fn mirrorFold(angle: f32, mirrors: f32) f32 {
+    if (mirrors <= 1) return angle;
     const sector = std.math.tau / mirrors;
     const within = @mod(angle, sector);
     return @min(within, sector - within);
+}
+
+/// The fold's radial law: how a screen radius picks its place in the frame.
+pub const Fold = enum {
+    /// Log radius, so rings keep their thickness as they run out and the
+    /// picture reads as a tunnel receding toward the middle.
+    tunnel,
+    /// Linear radius, so each ring is wider than the one inside it and the
+    /// frame reads as copies of itself expanding from the middle.
+    rings,
+    /// The rings law without the reflection every other ring carries, so the
+    /// frame's own lanes run straight out from the middle.
+    branches,
+};
+
+/// The radius the rest of the fold measures rings in.
+fn depthRadius(kind: Fold, radius: f32, half: f32) f32 {
+    return switch (kind) {
+        .tunnel => @log(radius / half + 0.01),
+        .rings, .branches => radius / half,
+    };
+}
+
+/// The band a ring shows. Tunnel and rings reflect every other ring, so the
+/// picture mirrors from the middle outwards; branches runs them straight, so
+/// the frame's lanes continue outward instead of changing direction.
+fn foldBand(kind: Fold, level: f32, within: f32) f32 {
+    const eased = bandWithin(within);
+    return if (kind == .branches) eased else ringBand(level, eased);
 }
 
 /// Everything the audio drives.
@@ -24,35 +55,90 @@ pub const FoldShape = struct {
     ring_count: f32 = rings_default,
     heart: f32 = 0,
     mirrors: f32 = 4,
+    fold: Fold = .tunnel,
 };
 
-/// The band a ring shows at, with every other ring reflected. Adjacent rings
-/// meet at their edges, so the picture mirrors from the middle outwards.
+/// The band a ring shows at, with every other ring reflected, so the picture
+/// mirrors from the middle outwards.
 fn ringBand(level: f32, band: f32) f32 {
     const parity = @mod(level, 2);
     return if (parity < 1) band else 1 - band;
 }
 
 /// Where the ring's picture sits between its two seams. The S-curve is flat at
-/// both ends, so the fold line has no slope for the sampler to catch on; it
-/// still runs 0 to 1, which keeps the parity flip continuous at a seam.
+/// both ends, so the fold line has no slope for the sampler to catch on.
 fn bandWithin(within: f32) f32 {
     const t = std.math.clamp(within, 0, 1);
     return t * t * (3 - 2 * t);
 }
 
+/// How soft the edge around a still rect is, in pixels.
+const calm: f32 = 1.5;
+
+/// The gate: how hard quiet columns are pulled down, as a down-expander
+/// threshold. Twice the threshold is where attenuation reaches nothing, so the
+/// top of the track attenuates the whole frame.
+pub const gate_track: Track = .{ .min = 0, .max = 1 };
+
+/// How much of a captured hit reaches the fold, as a multiplier on the capture's
+/// own kick.
+pub const kick_track: Track = .{ .min = 0, .max = 10 };
+
 /// How far one kick pushes the rings outward, in ring widths.
 const kick_push: f32 = 0.25;
+
+/// Rings the loudness adds on top of the lanes slider.
+const ring_push: f32 = 2.2;
+
+/// What the beat adds to the fold.
+pub const Beat = struct {
+    /// Extra lanes while the music is loud.
+    rings: f32 = 0,
+    /// How much wider the virtual window gets on a hit.
+    pump: f32 = 0,
+    /// Multiplier on the clock's step, so the tunnel moves with the music.
+    pace: f32 = 1,
+};
+
+/// The beat's whole grip on the fold. `loudness` is the smoothed level, `kick`
+/// the captured hit. Switched off, every term is neutral, so the picture no
+/// longer moves with the music at all.
+pub fn beat(loudness: f32, kick: f32, enabled: bool) Beat {
+    if (!enabled) return .{};
+    return .{
+        .rings = ring_push * loudness,
+        .pump = kick * window_pump,
+        .pace = 0.6 + 1.4 * loudness,
+    };
+}
 
 /// Rings per e-fold of radius: the default granularity of the tunnel.
 pub const rings_default: f32 = 2.2;
 
+/// Radians of spin per unit of the clock's turn: the sweep the lanes make.
+const spin_rate: f32 = 3;
+
+/// Where in the frame's sweep each lane starts, as a fraction of one, so no two
+/// neighbouring lanes show the same picture.
+const lane_offset: f32 = 0.37;
+
+/// How far each lane's own copy of the frame is turned against the one inside
+/// it.
+const spin: f32 = 0.35;
+
+/// The shear: radians of angle per ring of radius, so each facet spirals as it
+/// runs out from the middle.
+const twist: f32 = 0.55;
+
+/// How far each ring is turned against the next, by depth rather than by ring
+/// index: the index is a step, and a step at a seam shows two different texels
+/// on either side of it. Without this every ring samples the same slice, so the
+/// outward travel looks frozen the moment the content repeats.
+const ring_shift: f32 = 0.6;
+
 /// Ring phase advanced per effect second. Positive means the rings travel
 /// outward, from the fulcrum to the edges.
 const rush: f32 = 0.9;
-/// How far each ring is turned against the next.
-const twist: f32 = 0.55;
-
 /// How far one kick swells the virtual window, as a fraction of its scale.
 pub const window_pump: f32 = 0.12;
 
@@ -114,9 +200,9 @@ fn wanderGoal(epoch: i64) f32 {
     return @floatCast(unit * 2 - 1);
 }
 
-/// The virtual window. Geometric, so equal moves are equal magnifications and
-/// the middle lands on exactly the real window.
-pub const window_track: Track = .{ .min = 1.0 / 3.0, .max = 3, .geometric = true };
+/// The virtual window. It opens from the real window and only widens: the left
+/// end is the real window, the right end is six times it.
+pub const window_track: Track = .{ .min = 1, .max = 6, .geometric = true };
 
 /// The window the fold is laid out on: the real window when DMT started,
 /// scaled.
@@ -196,16 +282,19 @@ fn seeded(epoch: i64) u64 {
 /// virtual window the tunnel's geometry is laid out on.
 pub fn fold(
     p: dvui.Point.Physical,
-    clock: Clock,
+    view: Lens,
     size: dvui.Size.Physical,
     canvas: dvui.Size.Physical,
-    shape: FoldShape,
+    stills: []const dvui.Rect.Physical,
 ) dvui.Point.Physical {
     if (size.w <= 0 or size.h <= 0) return p;
     if (canvas.w <= 0 or canvas.h <= 0) return p;
 
-    const rush_phase: f32 = @floatCast(clock.rush * speed);
-    const turn_phase: f32 = @floatCast(clock.turn * speed);
+    // The controls sit out of the fold, with a soft edge so nothing next to
+    // them is torn.
+    const strength = geom.stillMask(p.x, p.y, stills, view.calm);
+    if (strength <= 0) return p;
+
     // Radius is measured against the virtual window, so the ring the point
     // lands in depends on the canvas and never on how big the real window is.
     const half = @min(canvas.w, canvas.h) / 2;
@@ -213,45 +302,49 @@ pub fn fold(
     const q = dvui.Point.Physical{ .x = p.x - centre.x, .y = p.y - centre.y };
     const radius = @sqrt(q.x * q.x + q.y * q.y);
 
-    // Tunnel: the log radius picks the ring, and the phase pushes every ring
-    // outward, so the frame is always leaving the fulcrum.
-    const log_radius = @log(radius / half + 0.01);
+    // The radius picks the ring, and alternate rings are reflected, so the
+    // picture mirrors outwards from the middle.
+    const depth_radius = depthRadius(view.fold, radius, half);
     const angle0 = std.math.atan2(q.y, q.x);
-    // The seams drift with the angle, so the rings wind into a spiral instead
-    // of closing into circles. A sine of the angle is continuous through
-    // atan2's cut, where a linear shear would leave one hard ray.
-    const depth = log_radius * shape.ring_count - rush_phase - shape.heart * kick_push;
+    const depth = depth_radius * view.ring_count - view.rush_phase - view.heart * view.kick_push;
     const level = @floor(depth);
-    const band = ringBand(level, bandWithin(depth - level));
+    const band = foldBand(view.fold, level, depth - level);
 
-    // Each ring shows the frame again at a full radius, turned against its
-    // neighbour, and alternate rings are turned inside out, so the picture
-    // reflects across every ring boundary on its way out from the middle.
-    // Mirroring both axes folds that copy into V chevrons.
-    //
-    // The ring's angle is `turn` twice over, once inside the ring and once as
-    // the mirror rotation, so one rotation of the radial unit vector covers
-    // both: no atan2, and a single sine and cosine per vertex.
-    const turned = angle0 + log_radius * shape.ring_count * twist + turn_phase * 2;
-    const angle = mirrorFold(turned, shape.mirrors);
-    const around = @cos(angle);
-    const across = @sin(angle);
-    // Time runs along x, so the texel has to reach the newest edge of the
-    // strip; reaching only half way from the centre kept the newest fifth of
-    // the history off screen, which reads as delay however fast the rest of
-    // the pipeline is. Both x signs are used: `wrap` reflects the far side
-    // back in, the same fold the mirroring relies on. y stays on one side,
-    // which halves the texels a frame touches.
+    // Spin turns the whole sampling frame, so the seams and the facets sweep
+    // around the middle. It comes before the mirror fold, or the two sides of
+    // every mirror would offset by their own angle. The twist and the ring
+    // shift shear the folded angle, so the lanes wind outward.
+    const angle = mirrorFold(angle0 + view.turn_phase * view.spin_rate, view.mirrors) +
+        depth_radius * view.ring_count * view.twist +
+        depth * view.ring_shift;
+
+    // Stagger starts each lane at its own point of the sweep, so neighbouring
+    // lanes never show the same picture.
+    const lane_band = @mod(band + level * view.lane_offset, 1);
+
+    // The sweep: from the middle of the frame out to its edge and back, which
+    // is what reads as expansion.
+    const reach = half * lane_band;
     const local = dvui.Point.Physical{
-        .x = around * (canvas.w / 2 * band),
-        .y = @abs(across) * (canvas.h / 2 * band),
+        .x = @abs(@cos(angle)) * reach,
+        .y = @abs(@sin(angle)) * reach,
     };
 
-    const source = dvui.Point.Physical{ .x = centre.x + local.x, .y = centre.y + local.y };
-    return .{
-        .x = wrap(source.x, size.w),
-        .y = wrap(source.y, size.h),
+    // Each lane turns its own copy of the frame, so the rings stand against
+    // each other instead of lining up.
+    const turned = level * view.spin;
+    const source = dvui.Point.Physical{
+        .x = wrap(centre.x + local.x * @cos(turned) - local.y * @sin(turned), size.w),
+        .y = wrap(centre.y + local.x * @sin(turned) + local.y * @cos(turned), size.h),
     };
+    return .{
+        .x = mix(p.x, wrap(source.x, size.w), strength),
+        .y = mix(p.y, wrap(source.y, size.h), strength),
+    };
+}
+
+fn mix(from: f32, to: f32, amount: f32) f32 {
+    return from + (to - from) * amount;
 }
 
 /// Reflect `v` into `[0, extent]`. The reflection is the fold, so the frame
@@ -265,14 +358,56 @@ fn wrap(v: f32, extent: f32) f32 {
     return bounced;
 }
 
+/// The numbers the fold runs on, so the fragment shader can be fed the same
+/// ones the CPU fold uses.
+pub const Lens = struct {
+    rush_phase: f32,
+    turn_phase: f32,
+    ring_count: f32,
+    heart: f32,
+    kick_push: f32,
+    mirrors: f32,
+    spin_rate: f32,
+    spin: f32,
+    twist: f32,
+    ring_shift: f32,
+    lane_offset: f32,
+    calm: f32,
+    fold: Fold,
+};
+
+/// The lens with the stages that are switched off flattened out: no spin, no
+/// facets, no shear, no lane offset, no beat push.
+pub fn lens(clock: Clock, shape: FoldShape, toggles: stages.Toggles) Lens {
+    const spinning = toggles.enabled(.spin);
+    const pushing = toggles.enabled(.kick);
+    return .{
+        .rush_phase = @floatCast(clock.rush * speed),
+        .turn_phase = if (spinning) @floatCast(clock.turn * speed) else 0,
+        .ring_count = shape.ring_count,
+        .heart = if (pushing) shape.heart else 0,
+        .kick_push = if (pushing) kick_push else 0,
+        .mirrors = if (toggles.enabled(.mirrors)) shape.mirrors else 1,
+        .spin_rate = if (spinning) spin_rate else 0,
+        .spin = spin,
+        .twist = if (toggles.enabled(.twist)) twist else 0,
+        .ring_shift = ring_shift,
+        .lane_offset = if (toggles.enabled(.stagger)) lane_offset else 0,
+        .calm = calm,
+        .fold = shape.fold,
+    };
+}
+
 /// A grid of quads over the window, every vertex showing a folded texel.
+/// The fallback for when the shader pipeline cannot be built; the shader in
+/// `gpu.zig` does this on the GPU otherwise.
 pub fn mesh(
     arena: std.mem.Allocator,
     cache: *Cache,
-    clock: Clock,
+    view: Lens,
     size: dvui.Size.Physical,
     canvas: dvui.Size.Physical,
-    shape: FoldShape,
+    stills: []const dvui.Rect.Physical,
 ) !geom.Mesh {
     const grid = gridShape(size);
     const across = grid.columns + 1;
@@ -285,11 +420,17 @@ pub fn mesh(
         const y = size.h * @as(f32, @floatFromInt(row)) / down;
         for (0..across) |column| {
             const x = size.w * @as(f32, @floatFromInt(column)) / right;
-            const source = fold(.{ .x = x, .y = y }, clock, size, canvas, shape);
+            const source = fold(.{ .x = x, .y = y }, view, size, canvas, stills);
+            const uv = dvui.Point.Physical{
+                .x = geom.sampleUV(source.x, size.w),
+                .y = geom.sampleUV(source.y, size.h),
+            };
+            // Depth: the far end of the tunnel is dark and the near rim is
+            // bright, so the eye reads the rings as distance coming at it.
             vertexes[at] = .{
                 .pos = .{ .x = x, .y = y },
                 .col = .{ .r = 255, .g = 255, .b = 255 },
-                .uv = .{ geom.sampleUV(source.x, size.w), geom.sampleUV(source.y, size.h) },
+                .uv = .{ uv.x, uv.y },
             };
             at += 1;
         }
@@ -348,15 +489,15 @@ pub fn draw(
     texture: dvui.Texture,
     arena: std.mem.Allocator,
     cache: *Cache,
-    clock: Clock,
+    view: Lens,
     size: dvui.Size.Physical,
     canvas: dvui.Size.Physical,
-    shape: FoldShape,
+    stills: []const dvui.Rect.Physical,
 ) !void {
     if (size.w <= 0 or size.h <= 0) return;
     const bounds = dvui.Rect.Physical{ .x = 0, .y = 0, .w = size.w, .h = size.h };
 
-    const grid = try mesh(arena, cache, clock, size, canvas, shape);
+    const grid = try mesh(arena, cache, view, size, canvas, stills);
     try dvui.renderTriangles(.{
         .vertexes = grid.vertexes,
         .indices = grid.indices,
@@ -374,7 +515,7 @@ test "the fold always samples inside the frame" {
                 .x = @as(f32, @floatFromInt(column)) * 29.5,
                 .y = @as(f32, @floatFromInt(row)) * 18.0,
             };
-            const shown = fold(p, .{ .rush = time }, framesize, framesize, .{});
+            const shown = fold(p, lens(.{ .rush = time }, .{}, .{}), framesize, framesize, &.{});
             try std.testing.expect(shown.x >= 0 and shown.x <= framesize.w);
             try std.testing.expect(shown.y >= 0 and shown.y <= framesize.h);
         }
@@ -392,7 +533,7 @@ test "the frame is folded, not copied" {
                 .x = 60 + @as(f32, @floatFromInt(column)) * 55,
                 .y = 60 + @as(f32, @floatFromInt(row)) * 32,
             };
-            const shown = fold(p, .{ .rush = time }, framesize, framesize, .{});
+            const shown = fold(p, lens(.{ .rush = time }, .{}, .{}), framesize, framesize, &.{});
             if (@abs(shown.x - p.x) + @abs(shown.y - p.y) > 20) folded += 1;
         }
     }
@@ -401,8 +542,8 @@ test "the frame is folded, not copied" {
 
 test "the mirror axes turn with the clock" {
     const p = dvui.Point.Physical{ .x = 700, .y = 300 };
-    const before = fold(p, .{ .rush = 0 }, framesize, framesize, .{});
-    const after = fold(p, .{ .rush = 1 }, framesize, framesize, .{});
+    const before = fold(p, lens(.{ .rush = 0 }, .{}, .{}), framesize, framesize, &.{});
+    const after = fold(p, lens(.{ .rush = 1 }, .{}, .{}), framesize, framesize, &.{});
     try std.testing.expect(@abs(before.x - after.x) + @abs(before.y - after.y) > 0.5);
 }
 
@@ -442,21 +583,22 @@ test "speed and turn are seeded, not stepped" {
     try std.testing.expectEqual(one.spin, again.spin);
 }
 
-test "the tunnel keeps its size when the real window resizes" {
-    const clock = Clock{ .rush = 3.5, .turn = 1 };
-    const narrow = dvui.Size.Physical{ .w = 1180, .h = 720 };
-    const wide = dvui.Size.Physical{ .w = 1920, .h = 1080 };
-    const canvas = narrow;
+test "each lane samples its own part of the frame" {
+    const size = dvui.Size.Physical{ .w = 400, .h = 400 };
+    const centre = dvui.Point.Physical{ .x = 200, .y = 200 };
+    // Two points at the same angle, one lane apart, land on different points of
+    // the frame: the reflection of alternate lanes is what keeps them distinct.
+    const radius: f32 = 60;
+    const inner = fold(.{ .x = centre.x + radius, .y = centre.y }, lens(.{}, .{}, .{}), size, size, &.{});
+    const outer = fold(.{ .x = centre.x + radius * 2, .y = centre.y }, lens(.{}, .{}, .{}), size, size, &.{});
+    try std.testing.expect(inner.x != outer.x or inner.y != outer.y);
+}
 
-    // The same offset from the centre lands on the same texel offset in both
-    // windows: the real window reveals more rings, it does not rescale them.
-    for (0..10) |step| {
-        const offset = 40 + @as(f32, @floatFromInt(step)) * 90;
-        const a = fold(.{ .x = narrow.w / 2 + offset, .y = narrow.h / 2 - offset * 0.4 }, clock, narrow, canvas, .{});
-        const b = fold(.{ .x = wide.w / 2 + offset, .y = wide.h / 2 - offset * 0.4 }, clock, wide, canvas, .{});
-        try std.testing.expectApproxEqAbs(a.x - narrow.w / 2, b.x - wide.w / 2, 0.001);
-        try std.testing.expectApproxEqAbs(a.y - narrow.h / 2, b.y - wide.h / 2, 0.001);
-    }
+test "alternate rings are reflected so the picture mirrors outwards" {
+    try std.testing.expectEqual(@as(f32, 0.2), ringBand(0, 0.2));
+    try std.testing.expectEqual(@as(f32, 0.8), ringBand(1, 0.2));
+    // The seam between two rings is continuous: both sides show the edge.
+    try std.testing.expectApproxEqAbs(ringBand(0, 1), ringBand(1, 0), 0.0001);
 }
 
 test "the fold stays inside the frame at any window and canvas" {
@@ -474,7 +616,7 @@ test "the fold stays inside the frame at any window and canvas" {
                         .x = @as(f32, @floatFromInt(column)) * size.w / 11,
                         .y = @as(f32, @floatFromInt(row)) * size.h / 11,
                     };
-                    const shown = fold(p, clock, size, canvas, .{});
+                    const shown = fold(p, lens(clock, .{}, .{}), size, canvas, &.{});
                     try std.testing.expect(shown.x >= 0 and shown.x <= size.w);
                     try std.testing.expect(shown.y >= 0 and shown.y <= size.h);
                 }
@@ -521,26 +663,87 @@ test "the kaleidoscope folds every facet the same way" {
     try std.testing.expectApproxEqAbs(mirrorFold(0.7, 2), mirrorFold(std.math.pi + 0.7, 2), 0.0001);
 }
 
-test "the facets fold a point left of the centre onto the right" {
-    const size = dvui.Size.Physical{ .w = 400, .h = 400 };
-    const left = dvui.Point.Physical{ .x = 120, .y = 200 };
+test "a switched-off stage drops out of the lens" {
+    const shape = FoldShape{ .mirrors = 6, .heart = 0.8, .ring_count = 3 };
+    const clock = Clock{ .rush = 1, .turn = 1 };
+    const all_on = lens(clock, shape, .{});
 
-    const folded = fold(left, .{}, size, size, .{});
-    try std.testing.expect(folded.x >= 200);
+    var toggles = stages.Toggles{};
+    for ([_]stages.Stage{ .mirrors, .spin, .stagger, .twist, .kick }) |stage| toggles.set(stage, false);
+    const plain = lens(clock, shape, toggles);
+
+    try std.testing.expectEqual(@as(f32, 1), plain.mirrors);
+    try std.testing.expectEqual(@as(f32, 0), plain.spin_rate);
+    try std.testing.expectEqual(@as(f32, 0), plain.heart);
+    try std.testing.expectEqual(@as(f32, 0), plain.turn_phase);
+
+    // The ring count and the rush are not a switchable stage and stay put.
+    try std.testing.expectEqual(all_on.ring_count, plain.ring_count);
+    try std.testing.expectEqual(all_on.rush_phase, plain.rush_phase);
+    try std.testing.expect(all_on.spin_rate > 0);
 }
 
-test "alternate rings are reflected so the picture mirrors outwards" {
-    try std.testing.expectEqual(@as(f32, 0.2), ringBand(0, 0.2));
-    try std.testing.expectEqual(@as(f32, 0.8), ringBand(1, 0.2));
-    try std.testing.expectEqual(@as(f32, 0.2), ringBand(2, 0.2));
+test "one facet samples the frame unfolded" {
+    const size = dvui.Size.Physical{ .w = 400, .h = 400 };
+    const radius: f32 = 90;
+    const centre: f32 = 200;
+    const angle: f32 = 0.2;
+    const sector = @as(f32, std.math.tau) / 6;
 
-    // The seam between two rings is continuous: both sides show the edge.
-    try std.testing.expectApproxEqAbs(ringBand(0, 1), ringBand(1, 0), 0.0001);
-    try std.testing.expectApproxEqAbs(ringBand(-1, 0.3), 0.7, 0.0001);
+    var no_mirrors = stages.Toggles{};
+    no_mirrors.set(.mirrors, false);
+    const faceted = lens(.{}, .{ .mirrors = 6 }, .{});
+    const plain = lens(.{}, .{ .mirrors = 6 }, no_mirrors);
+
+    const at = struct {
+        fn point(at_angle: f32, middle: f32, reach: f32) dvui.Point.Physical {
+            return .{
+                .x = middle + @cos(at_angle) * reach,
+                .y = middle + @sin(at_angle) * reach,
+            };
+        }
+    }.point;
+
+    // Six facets fold a full facet apart onto the same angle.
+    const faceted_a = fold(at(angle, centre, radius), faceted, size, size, &.{});
+    const faceted_b = fold(at(angle + sector, centre, radius), faceted, size, size, &.{});
+    try std.testing.expectApproxEqAbs(faceted_a.x, faceted_b.x, 0.001);
+
+    // Without the fold the same two points sample different places.
+    const plain_a = fold(at(angle, centre, radius), plain, size, size, &.{});
+    const plain_b = fold(at(angle + sector, centre, radius), plain, size, size, &.{});
+    try std.testing.expect(@abs(plain_a.x - plain_b.x) > 1 or @abs(plain_a.y - plain_b.y) > 1);
+}
+
+test "the facets mirror across their edges" {
+    const size = dvui.Size.Physical{ .w = 400, .h = 400 };
+    const centre = dvui.Point.Physical{ .x = 200, .y = 200 };
+    const radius: f32 = 90;
+    const sector: f32 = @as(f32, std.math.tau) / 4;
+    const angle: f32 = 0.3;
+
+    const view = lens(.{}, .{ .mirrors = 4 }, .{});
+    const first = fold(
+        .{ .x = centre.x + @cos(angle) * radius, .y = centre.y + @sin(angle) * radius },
+        view,
+        size,
+        size,
+        &.{},
+    );
+    const mirrored = fold(
+        .{ .x = centre.x + @cos(sector - angle) * radius, .y = centre.y + @sin(sector - angle) * radius },
+        view,
+        size,
+        size,
+        &.{},
+    );
+
+    try std.testing.expectApproxEqAbs(first.x, mirrored.x, 0.001);
+    try std.testing.expectApproxEqAbs(first.y, mirrored.y, 0.001);
 }
 
 test "every slider track round-trips and clamps" {
-    const tracks = [_]Track{ speed_track, wander_track, window_track, rings_track, mirrors_track };
+    const tracks = [_]Track{ speed_track, wander_track, window_track, rings_track, mirrors_track, gate_track, kick_track };
 
     for (tracks) |track| {
         for ([_]f32{ 0, 0.25, 0.5, 0.75, 1 }) |position| {
@@ -556,12 +759,19 @@ test "every slider track round-trips and clamps" {
     }
 }
 
-test "the middle of the window slider is the real window" {
-    try std.testing.expectApproxEqAbs(@as(f32, 1), window_track.value(0.5), 0.0001);
+test "the window slider opens from the real window and only widens" {
     const base = dvui.Size.Physical{ .w = 1280, .h = 800 };
-    const scaled = virtualSize(base, window_track.value(0.5));
-    try std.testing.expectApproxEqAbs(base.w, scaled.w, 0.001);
-    try std.testing.expectApproxEqAbs(base.h, scaled.h, 0.001);
+
+    // Leftmost is the real window.
+    const closed = virtualSize(base, window_track.value(0));
+    try std.testing.expectApproxEqAbs(base.w, closed.w, 0.001);
+    try std.testing.expectApproxEqAbs(base.h, closed.h, 0.001);
+
+    // Everything else is larger, and the right end is the widest.
+    const middle = virtualSize(base, window_track.value(0.5));
+    const wide = virtualSize(base, window_track.value(1));
+    try std.testing.expect(closed.w < middle.w);
+    try std.testing.expect(middle.w < wide.w);
 }
 
 test "the mirror track lands on whole facets inside the range" {
@@ -636,8 +846,8 @@ test "the lane and mirror sliders change where the fold samples" {
                     .x = 100 + @as(f32, @floatFromInt(column)) * 180,
                     .y = 80 + @as(f32, @floatFromInt(row)) * 110,
                 };
-                const base = fold(p, clock, framesize, framesize, .{});
-                const shown = fold(p, clock, framesize, framesize, shape);
+                const base = fold(p, lens(clock, .{}, .{}), framesize, framesize, &.{});
+                const shown = fold(p, lens(clock, shape, .{}), framesize, framesize, &.{});
                 moved += @abs(shown.x - base.x) + @abs(shown.y - base.y);
             }
         }
@@ -646,3 +856,29 @@ test "the lane and mirror sliders change where the fold samples" {
     }
 }
 
+
+test "the beat leaves the fold steady when the kick stage is off" {
+    const off = beat(1, 1, false);
+    try std.testing.expectEqual(@as(f32, 0), off.rings);
+    try std.testing.expectEqual(@as(f32, 0), off.pump);
+    try std.testing.expectEqual(@as(f32, 1), off.pace);
+
+    const on = beat(1, 1, true);
+    try std.testing.expect(on.rings > 0);
+    try std.testing.expect(on.pump > 0);
+    try std.testing.expect(on.pace > 1);
+}
+
+test "branches runs the lanes straight where rings reflects them" {
+    const across_ring = 0.3;
+    try std.testing.expectApproxEqAbs(foldBand(.rings, 0, across_ring), foldBand(.rings, 2, across_ring), 0.0001);
+    try std.testing.expectApproxEqAbs(1 - foldBand(.rings, 0, across_ring), foldBand(.rings, 1, across_ring), 0.0001);
+    try std.testing.expectApproxEqAbs(foldBand(.branches, 0, across_ring), foldBand(.branches, 1, across_ring), 0.0001);
+}
+
+test "the rings fold expands outward where the tunnel recedes" {
+    const half: f32 = 100;
+    try std.testing.expectApproxEqAbs(@as(f32, 2), depthRadius(.rings, 2 * half, half), 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), depthRadius(.rings, half, half), 0.0001);
+    try std.testing.expect(depthRadius(.tunnel, 2 * half, half) < depthRadius(.tunnel, half, half) + 0.7);
+}

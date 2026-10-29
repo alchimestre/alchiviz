@@ -1,36 +1,16 @@
-//! The waveform: peak bars across the whole window, coloured by the three
-//! bands, with the body under each bar dimmed.
+//! The frame the fold samples: the capture as nested depth layers, painted
+//! through a heat ramp indexed by loudness, depth and column.
 
 const std = @import("std");
 const dvui = @import("dvui");
 const signal = @import("signal.zig");
 
 /// Pixels per bar.
-const step: f32 = 3;
-
 pub const Color = struct { r: u8, g: u8, b: u8, a: u8 = 0xff };
 
 /// Dracula's window surface, so the fold's dark gaps read as the same frame.
 const background = Color{ .r = 0x0b, .g = 0x0b, .b = 0x12 };
 
-/// Mean band levels over a bar, at the brightness of its peak. Low, mid and
-/// high own red, green and blue, and brightness follows the square root of the
-/// level so quiet bars stay readable.
-pub fn tint(level: f32, low: f32, mid: f32, high: f32) Color {
-    const strongest = @max(@max(low, @max(mid, high)), 0);
-    if (strongest < 0.0001) return .{ .r = 0, .g = 0, .b = 0, .a = 0 };
-
-    const strength = 0.25 + 0.75 * @sqrt(std.math.clamp(level, 0, 1));
-    const gain = 255 * strength / strongest;
-    return .{
-        .r = @intFromFloat(@min(255, low * gain)),
-        .g = @intFromFloat(@min(255, mid * gain)),
-        .b = @intFromFloat(@min(255, high * gain)),
-    };
-}
-
-/// Scale the distance between a tint and its own grey. 1 leaves the tint
-/// alone; above 1 opens the band colours up, below 1 washes them toward grey.
 pub fn chroma(colour: Color, amount: f32) Color {
     if (colour.a == 0) return colour;
     const luma = 0.299 * @as(f32, @floatFromInt(colour.r)) +
@@ -49,45 +29,145 @@ fn push(value: u8, luma: f32, amount: f32) u8 {
     return @intFromFloat(std.math.clamp(opened, 0, 255));
 }
 
-/// Draw the capture across the window, newest at the right edge.
-pub fn draw(arena: std.mem.Allocator, size: dvui.Size.Physical, ring: *const signal.Ring, chroma_amount: f32, blur: f32) !void {
-    if (size.w <= 0 or size.h <= 0) return;
+/// How the capture is drawn before the fold repeats it.
+pub const Source = struct {
+    gate: f32 = 0,
+    /// Time in the capture's own clock, so a style that moves stays tied to
+    /// the audio rather than to the wall clock.
+    phase: f32 = 0,
+};
 
-    const columns: usize = @intFromFloat(@max(1, @ceil(size.w / step)));
+pub fn drawSource(
+    arena: std.mem.Allocator,
+    size: dvui.Size.Physical,
+    ring: *const signal.Ring,
+    chroma_amount: f32,
+    blur: f32,
+    source: Source,
+) !void {
+    if (size.w <= 0 or size.h <= 0) return;
+    try terrain(arena, size, ring, chroma_amount, blur, source);
+}
+
+fn prepare(arena: std.mem.Allocator, ring: *const signal.Ring, blur: f32, columns: usize, gate: f32) ![]signal.Column {
     const stats = try arena.alloc(signal.Column, columns);
     fill(stats, ring);
+    compress(stats, gate);
     smooth(stats);
     const scratch = try arena.alloc(signal.Column, stats.len);
     soften(stats, scratch, blur);
     normalise(stats);
+    return stats;
+}
 
-    const quads = columns * 2 + 1;
+/// The gate: a column under the threshold is silence, so nothing is drawn for
+/// it. Runs before the smoothing, so the gate closes on the capture and not on
+/// the drawn envelope.
+fn compress(stats: []signal.Column, cutoff: f32) void {
+    if (cutoff <= 0) return;
+    for (stats) |*stat| {
+        const gain = knee(stat.peak, cutoff);
+        stat.* = .{
+            .peak = stat.peak * gain,
+            .body = stat.body * gain,
+            .low = stat.low * gain,
+            .mid = stat.mid * gain,
+            .high = stat.high * gain,
+        };
+    }
+}
+
+/// Smoothstep from silence at zero to no attenuation at twice the threshold, so
+/// a column near the threshold fades rather than switching off.
+fn knee(peak: f32, cutoff: f32) f32 {
+    const t = std.math.clamp(peak / (2 * cutoff), 0, 1);
+    return t * t * (3 - 2 * t);
+}
+
+fn flush(at: Quad, size: dvui.Size.Physical) !void {
+    try dvui.renderTriangles(.{
+        .vertexes = at.vertexes[0 .. at.next * 4],
+        .indices = at.indices[0 .. at.next * 6],
+        .bounds = .{ .x = 0, .y = 0, .w = size.w, .h = size.h },
+    }, null);
+}
+
+/// The capture as a floor of depth layers: the same waveform drawn again and
+/// again, each layer further back, smaller, dimmer, and shifted sideways by a
+/// wandering noise. The noise is a function of column, layer and time, so a
+/// frame can be reproduced exactly and the wander keeps moving.
+fn terrain(arena: std.mem.Allocator, size: dvui.Size.Physical, ring: *const signal.Ring, chroma_amount: f32, blur: f32, source: Source) !void {
+    const columns: usize = 240;
+    const layers: usize = 18;
+    const stats = try prepare(arena, ring, blur, columns, source.gate);
+
+    const quads = columns * layers + 1;
     const vertexes = try arena.alloc(dvui.Vertex, quads * 4);
     const indices = try arena.alloc(dvui.Vertex.Index, quads * 6);
     var at: Quad = .{ .vertexes = vertexes, .indices = indices, .next = 0 };
+    at.append(.{ .x = 0, .y = 0, .w = size.w, .h = size.h }, background);
 
-    at.append(.{ .x = 0, .y = 0, .w = size.w, .h = size.h }, ambient(stats));
-    for (stats, 0..) |stat, index| {
-        const left = size.w * @as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(columns));
-        const right = size.w * @as(f32, @floatFromInt(index + 1)) / @as(f32, @floatFromInt(columns));
-        const width = right - left;
-        const color = chroma(tint(stat.peak, stat.low, stat.mid, stat.high), chroma_amount);
-        if (color.a == 0) continue;
+    // Far layers first, so the near ones cover them.
+    for (0..layers) |layer| {
+        const t = @as(f32, @floatFromInt(layer)) / @as(f32, @floatFromInt(layers - 1));
+        const scale = 0.55 + 0.45 * t;
+        const gain = size.h * 0.30 * (0.65 + 0.35 * t);
+        const width = size.w / @as(f32, @floatFromInt(columns)) * scale;
+        const span = width * @as(f32, @floatFromInt(columns));
 
-        const body_h = size.h * stat.body;
-        const peak_h = size.h * stat.peak;
-        const dim = mix(background, color, 0.45);
-        if (body_h > 0) at.append(.{ .x = left, .y = size.h - body_h, .w = width, .h = body_h }, dim);
-        if (peak_h > body_h) at.append(.{ .x = left, .y = size.h - peak_h, .w = width, .h = peak_h - body_h }, color);
+        const inset = (size.w - span) / 2;
+        const baseline = size.h * (0.42 + 0.46 * t);
+        const dim = mix(background, .{ .r = 0xff, .g = 0xff, .b = 0xff }, 0.75 + 0.25 * t);
+
+        for (stats, 0..) |stat, index| {
+            const height = gain * stat.peak;
+            if (height < 1) continue;
+            const wander = wobble(index, layer, source.phase) * size.w * 0.05 * (1 - t);
+            const left = inset + width * @as(f32, @floatFromInt(index)) + wander;
+            // Heatmap: loudness picks the ramp, depth slides along it, and the
+            // columns sweep it too, so the floor spans every hue instead of
+            // one band of them.
+            const loudness = @min(1, stat.peak * 0.85 + stat.high * 0.5);
+            const sweep = @as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(columns));
+            const shade = chroma(heat(@mod(loudness * 0.7 + t * 0.2 + sweep * 0.45, 1)), chroma_amount);
+            const color = mul(shade, dim);
+            at.append(.{ .x = left, .y = baseline - height, .w = width, .h = height }, color);
+        }
     }
+    try flush(at, size);
+}
 
-    // Quads the mix skipped leave the index buffer short; only the used part
-    // is drawn.
-    try dvui.renderTriangles(.{
-        .vertexes = vertexes[0 .. at.next * 4],
-        .indices = indices[0 .. at.next * 6],
-        .bounds = .{ .x = 0, .y = 0, .w = size.w, .h = size.h },
-    }, null);
+/// Heatmap ramp: cold for quiet, red for loud, with the depth layer sliding
+/// along it so the floor of ridges reads as a gradient rather than one colour.
+fn heat(value: f32) Color {
+    const stops = [_]Color{
+        .{ .r = 0x12, .g = 0x1b, .b = 0x4a },
+        .{ .r = 0x00, .g = 0x9f, .b = 0xd0 },
+        .{ .r = 0x2e, .g = 0xd0, .b = 0x6a },
+        .{ .r = 0xff, .g = 0xd1, .b = 0x3a },
+        .{ .r = 0xff, .g = 0x45, .b = 0x2a },
+    };
+    const along = std.math.clamp(value, 0, 1) * @as(f32, @floatFromInt(stops.len - 1));
+    const lower: usize = @intFromFloat(@min(@floor(along), @as(f32, @floatFromInt(stops.len - 2))));
+    return mix(stops[lower], stops[lower + 1], along - @as(f32, @floatFromInt(lower)));
+}
+
+/// Smooth pseudo noise over column, layer and time: three sines, no state, so
+/// the same frame always draws the same way.
+fn wobble(index: usize, layer: usize, phase: f32) f32 {
+    const x = @as(f32, @floatFromInt(index)) * 0.13;
+    const z = @as(f32, @floatFromInt(layer)) * 0.9;
+    return @sin(x + phase * 0.9 + @sin(z * 1.7)) * @cos(z * 0.6 + x * 0.4 + phase * 0.3);
+}
+
+/// Scales a colour, keeping its alpha.
+fn mul(colour: Color, by: Color) Color {
+    return .{
+        .r = @intCast(@as(u32, colour.r) * by.r / 255),
+        .g = @intCast(@as(u32, colour.g) * by.g / 255),
+        .b = @intCast(@as(u32, colour.b) * by.b / 255),
+        .a = colour.a,
+    };
 }
 
 fn fill(stats: []signal.Column, ring: *const signal.Ring) void {
@@ -102,8 +182,13 @@ fn fill(stats: []signal.Column, ring: *const signal.Ring) void {
     const span: usize = @intFromFloat(@max(1, signal.history_seconds * ring.rate));
 
     const columns = stats.len;
+    // Bin on whole bars: audio arrives in callbacks shorter than a bar, so
+    // binning on the raw count re-sliced every bar mid-frame. Quantising keeps
+    // a bar on the same audio between callbacks.
+    const width = @max(1, span / columns);
+    const settled = samples.len / width * width;
     for (stats, 0..) |*stat, index| {
-        const range = barRange(columns, index, span, samples.len) orelse {
+        const range = barRange(columns, index, span, settled) orelse {
             stat.* = .{};
             continue;
         };
@@ -138,24 +223,6 @@ fn normalise(stats: []signal.Column) void {
         stat.peak = @min(1, stat.peak / reference);
         stat.body = @min(1, stat.body / reference);
     }
-}
-
-/// A dim wash in the current spectrum's colour, so the fold has something to
-/// repeat even between the bars.
-fn ambient(stats: []const signal.Column) Color {
-    if (stats.len == 0) return background;
-    var low: f32 = 0;
-    var mid: f32 = 0;
-    var high: f32 = 0;
-    for (stats) |stat| {
-        low += stat.low;
-        mid += stat.mid;
-        high += stat.high;
-    }
-    const count = @as(f32, @floatFromInt(stats.len));
-    const colour = tint(0.35, low / count, mid / count, high / count);
-    if (colour.a == 0) return background;
-    return mix(background, colour, 0.22);
 }
 
 /// Columns the soften pass reaches across at full blur.
@@ -223,13 +290,16 @@ const Quad = struct {
     next: usize = 0,
 
     fn append(self: *Quad, rect: dvui.Rect.Physical, color: Color) void {
-        const first: dvui.Vertex.Index = @intCast(self.next * 4);
-        const corners = [_]dvui.Point.Physical{
+        self.appendCorners(.{
             .{ .x = rect.x, .y = rect.y },
             .{ .x = rect.x + rect.w, .y = rect.y },
             .{ .x = rect.x + rect.w, .y = rect.y + rect.h },
             .{ .x = rect.x, .y = rect.y + rect.h },
-        };
+        }, color);
+    }
+
+    fn appendCorners(self: *Quad, corners: [4]dvui.Point.Physical, color: Color) void {
+        const first: dvui.Vertex.Index = @intCast(self.next * 4);
         for (corners, 0..) |corner, index| {
             self.vertexes[self.next * 4 + index] = .{
                 .pos = corner,
@@ -243,22 +313,53 @@ const Quad = struct {
     }
 };
 
-test "each band owns its RGB channel" {
-    const kick = tint(1, 1, 0, 0);
-    try std.testing.expect(kick.r == 255 and kick.g == 0 and kick.b == 0);
-
-    const mids = tint(1, 0, 1, 0);
-    try std.testing.expect(mids.g == 255 and mids.r == 0 and mids.b == 0);
-
-    const highs = tint(1, 0, 0, 1);
-    try std.testing.expect(highs.b == 255 and highs.r == 0 and highs.g == 0);
+test "the heat ramp runs from cold to hot" {
+    const cold = heat(0);
+    const hot = heat(1);
+    try std.testing.expect(cold.b > cold.r);
+    try std.testing.expect(hot.r > hot.b);
+    try std.testing.expect(heat(0.5).g > heat(0).g);
+    // Out of range values clamp instead of reading past the stops.
+    try std.testing.expectEqual(cold.r, heat(-3).r);
+    try std.testing.expectEqual(hot.r, heat(9).r);
 }
 
-test "quiet bars stay visible but dimmer" {
-    const soft = tint(0.1, 0.5, 0, 0).r;
-    const loud = tint(1, 0.5, 0, 0).r;
-    try std.testing.expect(soft < loud);
-    try std.testing.expect(soft > 0);
+test "the terrain noise is bounded and repeatable" {
+    for (0..64) |index| {
+        for (0..18) |layer| {
+            const once = wobble(index, layer, 1.25);
+            const again = wobble(index, layer, 1.25);
+            try std.testing.expectEqual(once, again);
+            try std.testing.expect(@abs(once) <= 1);
+        }
+    }
+    // It moves with time, or the wander would freeze.
+    try std.testing.expect(wobble(7, 3, 1.25) != wobble(7, 3, 1.30));
+}
+
+test "the gate pulls quiet columns down without cutting them" {
+    var stats = [_]signal.Column{
+        .{ .peak = 0.02, .low = 0.4 },
+        .{ .peak = 0.1, .mid = 0.5 },
+        .{ .peak = 0.15, .high = 0.6 },
+        .{ .peak = 0.5, .high = 0.7 },
+        .{},
+    };
+    compress(&stats, 0.1);
+
+    // Under the knee: pulled far down, but never switched off.
+    try std.testing.expect(stats[0].peak > 0);
+    try std.testing.expect(stats[0].peak < 0.02 * 0.2);
+    try std.testing.expect(stats[0].low > 0);
+    // At the threshold: half the level. Past twice it: untouched.
+    try std.testing.expectApproxEqAbs(@as(f32, 0.05), stats[1].peak, 0.0001);
+    try std.testing.expect(stats[2].peak > 0.1);
+    try std.testing.expect(stats[2].peak < 0.15);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), stats[3].peak, 0.0001);
+    // Silence stays silent, and zero cutoff leaves the frame alone.
+    try std.testing.expectEqual(@as(f32, 0), stats[4].peak);
+    compress(&stats, 0);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), stats[3].peak, 0.0001);
 }
 
 test "bars read the span from the right edge inwards" {
@@ -300,11 +401,6 @@ test "a quiet capture still fills part of the window" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.25), stats[0].peak, 1e-6);
 }
 
-test "silence leaves the background alone" {
-    const silent = [_]signal.Column{.{}};
-    try std.testing.expectEqual(background, ambient(&silent));
-}
-
 test "blur softens the columns and leaves them alone at zero" {
     var stats: [64]signal.Column = undefined;
     for (&stats, 0..) |*stat, index| {
@@ -325,10 +421,6 @@ test "blur softens the columns and leaves them alone at zero" {
     var sum: f32 = 0;
     for (stats) |stat| sum += stat.peak;
     try std.testing.expectApproxEqAbs(@as(f32, 32), sum, 3);
-}
-
-test "silence draws nothing" {
-    try std.testing.expectEqual(@as(u8, 0), tint(0, 0, 0, 0).a);
 }
 
 test "chroma opens a tint away from its grey and washes it back" {

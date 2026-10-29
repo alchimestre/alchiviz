@@ -4,16 +4,33 @@ const std = @import("std");
 const dvui = @import("dvui");
 const audio = @import("audio.zig");
 const dmt = @import("dmt.zig");
+const geom = @import("geom.zig");
 const signal = @import("signal.zig");
 const tap = @import("tap.zig");
+const keys = @import("keys.zig");
+const gpu = @import("gpu.zig");
 const wave = @import("wave.zig");
-
-/// Rings the loudness adds on top of the lanes slider.
-const ring_push: f32 = 2.2;
+const stages = @import("stages.zig");
+const blurbs = @import("blurbs.zig");
 
 const panel = dvui.Color{ .r = 0x14, .g = 0x14, .b = 0x1f, .a = 0xff };
 const ink = dvui.Color{ .r = 0xf8, .g = 0xf8, .b = 0xf2, .a = 0xff };
 const muted = dvui.Color{ .r = 0x8a, .g = 0x8a, .b = 0x9e, .a = 0xff };
+
+fn maybeStills(hidden: bool, stills: []const dvui.Rect.Physical) []const dvui.Rect.Physical {
+    return if (hidden) &.{} else stills;
+}
+
+fn inside(rect: dvui.Rect.Physical, point: dvui.Point.Physical) bool {
+    return point.x >= rect.x and point.x < rect.x + rect.w and
+        point.y >= rect.y and point.y < rect.y + rect.h;
+}
+
+/// The swapchain the frame is drawing into, handed over by the loop.
+pub const GpuFrame = struct {
+    cmd: ?*anyopaque = null,
+    swapchain: ?*anyopaque = null,
+};
 
 pub const App = struct {
     allocator: std.mem.Allocator,
@@ -33,6 +50,7 @@ pub const App = struct {
     open: bool = false,
 
     wave_target: ?dvui.Texture.Target = null,
+    frame_target: ?dvui.Texture.Target = null,
     fold_cache: dmt.Cache = .{},
     clock: dmt.Clock = .{},
     elapsed: f64 = 0,
@@ -48,12 +66,35 @@ pub const App = struct {
     virtual_base: ?dvui.Size.Physical = null,
     lane_rings: f32 = dmt.rings_default,
     lane_mirrors: f32 = 4,
+    kick_sensitivity: f32 = 1,
     lane_colour: f32 = 0,
     blur: f32 = 0,
+    gate: f32 = 0,
+    /// Which pipeline stages are switched on. Every stage has a toggle in the
+    /// right panel; the blurb under the window describes the one hovered.
+    toggles: stages.Toggles = .{},
+    fold_kind: dmt.Fold = .tunnel,
+    blurb_focus: blurbs.Subject = .{ .stage = .fold },
+    /// Set when the GPU painter was created; the fold then runs in a shader.
+    painter: ?*gpu.Painter = null, // kept for the CPU comparison run
+    gpu_message: ?[]const u8 = null,
+    gpu_frame: GpuFrame = .{},
+    /// True while the panel is out of the way; the bind that flips it comes
+    /// from the keys file.
+    ui_hidden: bool = false,
+    binds: keys.Binds = .{},
+    /// The panels' rects once drawn, so the fold leaves them flat and they can
+    /// be painted back exact: the input pane, the stage pane, the blurb.
+    stills: [3]dvui.Rect.Physical = .{ .{}, .{}, .{} },
 
     error_text: []u8 = &.{},
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, requested: ?[]const u8) !App {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        environ: *const std.process.Environ.Map,
+        requested: ?[]const u8,
+    ) !App {
         var tap_failure: ?anyerror = null;
         var system_tap = tap.start(io, allocator) catch |err| blk: {
             tap_failure = err;
@@ -86,6 +127,7 @@ pub const App = struct {
             audio.preferred(devices);
 
         var app: App = .{
+            .binds = keys.load(environ, io),
             .allocator = allocator,
             .io = io,
             .devices = devices,
@@ -162,6 +204,7 @@ pub const App = struct {
 
     pub fn frame(self: *App) void {
         self.pump();
+        self.readKeys();
         const rect = dvui.currentWindow().rect_pixels;
         const size = dvui.Size.Physical{ .w = rect.w, .h = rect.h };
         const arena = dvui.currentWindow().arena();
@@ -174,26 +217,91 @@ pub const App = struct {
             return;
         };
 
-        const texture = dvui.textureFromTarget(self.wave_target.?) catch {
-            self.setError("the waveform texture could not be read");
-            self.controls();
-            return;
-        };
+        // The shader folds straight onto the swapchain with the panel drawn
+        // over it, so only the CPU path needs the panel composited in.
+        const fold = self.toggles.fold;
+        const gpu_fold = fold and self.painter != null and
+            self.gpu_frame.cmd != null and self.gpu_frame.swapchain != null;
+
+        // Only stream mode and the CPU path compose the panel into the
+        // picture. Hidden, there is nothing to keep flat.
+        var texture: dvui.Texture = undefined;
+        var stills: []const dvui.Rect.Physical = &.{};
+        if (!gpu_fold and fold and !self.ui_hidden) {
+            texture = self.composeFrame(arena, size) catch {
+                self.setError("the backend cannot draw offscreen");
+                self.controls();
+                return;
+            };
+            stills = &self.stills;
+        } else {
+            texture = dvui.textureFromTarget(self.wave_target.?) catch {
+                self.setError("the waveform texture could not be read");
+                if (!self.ui_hidden) self.controls();
+                return;
+            };
+        }
 
         const levels = self.levels;
+        // Everything the beat does to the fold hangs off the kick stage, so
+        // switching kick off leaves the picture steady against the music.
+        const beat = dmt.beat(levels.level, self.hit(), self.toggles.kick);
         // The fold is laid out on the window it opened in, scaled by the window
         // slider and breathing with the wander and the kick.
-        const swell = @max(0.2, 1 + dmt.wander(self.elapsed, self.window_wander_limit) + levels.kick * dmt.window_pump);
+        const swell = @max(0.2, 1 + dmt.wander(self.elapsed, self.window_wander_limit) + beat.pump);
         const canvas = dmt.virtualSize(self.windowBase(size), self.virtual_scale * swell);
-        dmt.draw(texture, arena, &self.fold_cache, self.clock, size, canvas, .{
-            .ring_count = std.math.clamp(self.lane_rings + ring_push * levels.level, dmt.rings_track.min, dmt.rings_track.max),
-            .heart = levels.kick,
+        // The fold samples the frame where the screen point lands, so no axis
+        // swap.
+        const view = dmt.lens(self.clock, .{
+            .ring_count = std.math.clamp(self.lane_rings + beat.rings, dmt.rings_track.min, dmt.rings_track.max),
+            .heart = self.hit(),
             .mirrors = self.lane_mirrors,
-        }) catch {
-            self.setError("the fold could not be drawn");
-        };
+            .fold = self.fold_kind,
+        }, self.toggles);
+        if (gpu_fold) {
+            const values = gpu.Painter.pack(size, canvas, maybeStills(self.ui_hidden, stills), view);
+            self.painter.?.paintOpaque(self.gpu_frame.cmd, self.gpu_frame.swapchain, texture, values) catch |err| {
+                self.setError(@errorName(err));
+            };
+        } else if (fold) {
+            dmt.draw(texture, arena, &self.fold_cache, view, size, canvas, stills) catch {
+                self.setError("the fold could not be drawn");
+            };
+        } else {
+            const whole = dvui.Rect.Physical{ .x = 0, .y = 0, .w = size.w, .h = size.h };
+            geom.repaint(arena, &.{whole}, size, texture) catch {
+                self.setError("the waveform texture could not be shown");
+            };
+        }
+
+        if (self.ui_hidden) return;
+        if (!gpu_fold and fold) {
+            geom.repaint(arena, stills, size, texture) catch {};
+        } else {
+            self.controls();
+        }
+    }
+
+    /// The whole window in one texture: the waveform under the controls, so the
+    /// fold has a picture to repeat rather than a strip to slide.
+    fn composeFrame(self: *App, arena: std.mem.Allocator, size: dvui.Size.Physical) !dvui.Texture {
+        const target = try sizedTarget(&self.frame_target, size);
+        const previous = dvui.RenderTarget.setAsCurrent(.{ .texture = target, .offset = .{} });
+        defer _ = dvui.RenderTarget.setAsCurrent(previous);
+        dvui.clipSet(.{ .x = 0, .y = 0, .w = size.w, .h = size.h });
+        defer dvui.clipSet(dvui.currentWindow().rect_pixels);
+
+        const wave_texture = try dvui.textureFromTarget(self.wave_target.?);
+        const whole = dvui.Rect.Physical{ .x = 0, .y = 0, .w = size.w, .h = size.h };
+        const quad = try geom.quadMesh(arena, whole, size);
+        try dvui.renderTriangles(.{
+            .vertexes = quad.vertexes,
+            .indices = quad.indices,
+            .bounds = whole,
+        }, wave_texture);
 
         self.controls();
+        return try dvui.textureFromTarget(target);
     }
 
     /// The fold's own window: the size it had the first time a frame drew, so a
@@ -205,6 +313,8 @@ pub const App = struct {
         return self.virtual_base orelse size;
     }
 
+    /// The panels: the input pane on the left, the stage toggles on the right,
+    /// and the stage blurb along the bottom.
     fn controls(self: *App) void {
         var root = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .both,
@@ -212,6 +322,31 @@ pub const App = struct {
         });
         defer root.deinit();
 
+        // Scoped so the row closes before the blurb: an open box takes the
+        // next widget into itself, which would lay the blurb out beside the
+        // panels instead of under them.
+        {
+            // Expands over the free space, so the blurb sits at the bottom.
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+                .expand = .both,
+                .id_extra = 90,
+            });
+            defer row.deinit();
+
+            self.inputPane();
+            var gap = dvui.box(@src(), .{ .dir = .horizontal }, .{
+                .expand = .horizontal,
+                .min_size_content = .{ .w = 8 },
+                .id_extra = 91,
+            });
+            gap.deinit();
+            self.stagePane();
+        }
+
+        self.blurb();
+    }
+
+    fn inputPane(self: *App) void {
         var pane = dvui.box(@src(), .{ .dir = .vertical }, .{
             .background = true,
             .border = .{},
@@ -270,46 +405,176 @@ pub const App = struct {
             });
         }
 
-        dvui.labelNoFmt(@src(), "fold", .{}, .{
-            .font = .theme(.body),
-            .color_text = .{ .color = muted },
-            .id_extra = 6,
-        });
-
-        if (self.sliderRow("speed", dmt.speed_track.fraction(self.effect_speed), 10)) |fraction| {
+        if (self.painter == null) {
+            dvui.labelNoFmt(@src(), self.gpu_message orelse "folding on the cpu", .{}, .{
+                .font = .theme(.body),
+                .color_text = .{ .color = muted },
+                .id_extra = 991,
+            });
+        }
+        if (self.sliderRow(.speed, dmt.speed_track.fraction(self.effect_speed), 10)) |fraction| {
             self.effect_speed = dmt.speed_track.value(fraction);
         }
-        if (self.sliderRow("wander", dmt.wander_track.fraction(self.window_wander_limit), 20)) |fraction| {
+        if (self.sliderRow(.wander, dmt.wander_track.fraction(self.window_wander_limit), 20)) |fraction| {
             self.window_wander_limit = dmt.wander_track.value(fraction);
         }
-        if (self.sliderRow("window", dmt.window_track.fraction(self.virtual_scale), 30)) |fraction| {
+        if (self.sliderRow(.window, dmt.window_track.fraction(self.virtual_scale), 30)) |fraction| {
             self.virtual_scale = dmt.window_track.value(fraction);
         }
-        if (self.sliderRow("lanes", dmt.rings_track.fraction(self.lane_rings), 40)) |fraction| {
+        if (self.sliderRow(.lanes, dmt.rings_track.fraction(self.lane_rings), 40)) |fraction| {
             self.lane_rings = dmt.rings_track.value(fraction);
         }
-        if (self.sliderRow("colour", self.lane_colour, 50)) |fraction| {
+        if (self.sliderRow(.colour, self.lane_colour, 50)) |fraction| {
             self.lane_colour = fraction;
         }
-        if (self.sliderRow("blur", self.blur, 60)) |fraction| {
+        if (self.sliderRow(.blur, self.blur, 60)) |fraction| {
             self.blur = fraction;
         }
-        if (self.sliderRow("mirror", dmt.mirrors_track.fraction(self.lane_mirrors), 70)) |fraction| {
+        if (self.sliderRow(.mirror, dmt.mirrors_track.fraction(self.lane_mirrors), 70)) |fraction| {
             self.lane_mirrors = dmt.mirrors_track.value(fraction);
         }
+        if (self.sliderRow(.gate, dmt.gate_track.fraction(self.gate), 80)) |fraction| {
+            self.gate = dmt.gate_track.value(fraction);
+        }
+        if (self.sliderRow(.kick, dmt.kick_track.fraction(self.kick_sensitivity), 90)) |fraction| {
+            self.kick_sensitivity = dmt.kick_track.value(fraction);
+        }
+
+        self.keepFlat(0, pane.data().rectScaleFromParent().r);
+    }
+
+    /// One toggle per pipeline stage. Hovering a row puts that stage in the
+    /// blurb under the window.
+    fn stagePane(self: *App) void {
+        var pane = dvui.box(@src(), .{ .dir = .vertical }, .{
+            .background = true,
+            .border = .{},
+            .padding = .{ .x = 10, .y = 8, .w = 10, .h = 8 },
+            .color_fill = .{ .color = panel },
+            .id_extra = 100,
+        });
+        defer pane.deinit();
+
+        dvui.labelNoFmt(@src(), "stages", .{}, .{
+            .font = .theme(.body),
+            .color_text = .{ .color = muted },
+            .id_extra = 101,
+        });
+
+        for (stages.all, 0..) |stage, index| {
+            const extra: u32 = 110 + @as(u32, @intCast(index)) * 2;
+            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+                .id_extra = extra,
+                .min_size_content = .{ .w = 150, .h = 20 },
+            });
+            defer row.deinit();
+
+            var on = self.toggles.enabled(stage);
+            if (dvui.checkbox(@src(), &on, stage.label(), .{
+                .font = .theme(.body),
+                .color_text = .{ .color = ink },
+                .id_extra = extra + 1,
+            })) {
+                self.toggles.set(stage, !self.toggles.enabled(stage));
+            }
+
+            if (stage == .fold) self.lawPicker(extra + 900);
+
+            if (inside(row.data().rectScaleFromParent().r, dvui.currentWindow().mouse_pt)) {
+                self.blurb_focus = .{ .stage = stage };
+            }
+        }
+
+        self.keepFlat(1, pane.data().rectScaleFromParent().r);
+    }
+
+    /// The fold's radial law, one entry per law, each with its own blurb while
+    /// the menu is open.
+    fn lawPicker(self: *App, id: u32) void {
+        var picker: dvui.DropdownWidget = undefined;
+        picker.init(@src(), .{
+            .label = blurbs.lawLabel(self.fold_kind),
+            .selected_index = @intFromEnum(self.fold_kind),
+        }, .{
+            .font = .theme(.body),
+            .color_text = .{ .color = ink },
+            .gravity_y = 0.5,
+            .min_size_content = .{ .w = 84, .h = 18 },
+            .id_extra = id,
+        });
+        defer picker.deinit();
+
+        if (!picker.dropped()) return;
+        inline for (@typeInfo(dmt.Fold).@"enum".field_values) |value| {
+            const law: dmt.Fold = @enumFromInt(value);
+            var item = picker.addChoice();
+            defer item.deinit();
+            dvui.labelNoFmt(@src(), blurbs.lawLabel(law), .{}, item.data().options.strip().override(item.style()));
+
+            if (item.mouse_over) self.blurb_focus = .{ .law = law };
+            if (item.activeRect() != null) {
+                // Branches is the fold without a mirror, so picking it drops
+                // the facets rather than leaving a tick that cannot show.
+                if (law != self.fold_kind and law == .branches) self.toggles.mirrors = false;
+                self.fold_kind = law;
+                picker.close();
+            }
+        }
+    }
+
+    /// What the thing under the mouse does, under the panels.
+    fn blurb(self: *App) void {
+        var strip = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .background = true,
+            .border = .{},
+            .padding = .{ .x = 10, .y = 6, .w = 10, .h = 6 },
+            .color_fill = .{ .color = panel },
+            .expand = .horizontal,
+            .min_size_content = .{ .h = 58 },
+            .id_extra = 200,
+        });
+        defer strip.deinit();
+
+        var text = dvui.textLayout(@src(), .{ .break_lines = true }, .{
+            .font = .theme(.body),
+            .color_text = .{ .color = ink },
+            .expand = .horizontal,
+            .id_extra = 201,
+        });
+        defer text.deinit();
+        text.addText(self.blurb_focus.title(), .{});
+        text.addText(": ", .{});
+        text.addText(self.blurb_focus.description(), .{});
+
+        self.keepFlat(2, strip.data().rectScaleFromParent().r);
+    }
+
+    /// Remember a panel's rect so the fold leaves it flat and it is painted
+    /// back exact. A rect is only known once the box has laid its children out.
+    fn keepFlat(self: *App, slot: usize, rect: dvui.Rect.Physical) void {
+        if (rect.w <= 0 or rect.h <= 0) return;
+        self.stills[slot] = .{
+            .x = rect.x - 1,
+            .y = rect.y - 1,
+            .w = rect.w + 2,
+            .h = rect.h + 2,
+        };
     }
 
     /// A label with a slider beside it. Returns the new position only when the
     /// slider moved.
-    fn sliderRow(self: *App, text: []const u8, start: f32, id: u32) ?f32 {
-        _ = self;
+    fn sliderRow(self: *App, knob: blurbs.Knob, start: f32, id: u32) ?f32 {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .id_extra = id,
             .min_size_content = .{ .h = 22 },
         });
         defer row.deinit();
 
-        dvui.labelNoFmt(@src(), text, .{}, .{
+        if (inside(row.data().rectScaleFromParent().r, dvui.currentWindow().mouse_pt)) {
+            self.blurb_focus = .{ .knob = knob };
+        }
+
+        dvui.labelNoFmt(@src(), knob.label(), .{}, .{
             .font = .theme(.body),
             .color_text = .{ .color = ink },
             .gravity_y = 0.5,
@@ -327,6 +592,11 @@ pub const App = struct {
         return if (moved) fraction else null;
     }
 
+    /// The captured hit, scaled by the kick slider.
+    fn hit(self: *const App) f32 {
+        return self.levels.kick * self.kick_sensitivity;
+    }
+
     /// Move the clock with the capture and follow its loudness.
     fn pump(self: *App) void {
         const now = std.Io.Clock.awake.now(self.io).nanoseconds;
@@ -340,7 +610,8 @@ pub const App = struct {
         self.elapsed += step;
         // The tunnel keeps moving through silence; only its speed follows the
         // capture.
-        self.clock.advance(step * self.effect_speed * (0.6 + 1.4 * self.levels.level), dmt.mood(self.elapsed));
+        const beat = dmt.beat(self.levels.level, self.hit(), self.toggles.kick);
+        self.clock.advance(step * self.effect_speed * beat.pace, dmt.mood(self.elapsed));
 
         const ring = if (self.ring) |*value| value else return;
         const before = ring.pushes;
@@ -382,7 +653,33 @@ pub const App = struct {
         defer dvui.clipSet(dvui.currentWindow().rect_pixels);
 
         const ring = if (self.ring) |*value| value else return;
-        try wave.draw(arena, size, ring, dmt.chromaLevel(self.lane_colour), self.blur);
+        const chroma_amount = dmt.chromaLevel(self.lane_colour);
+        try wave.drawSource(arena, size, ring, chroma_amount, self.blur, .{
+            .gate = self.gate,
+            .phase = @floatCast(self.clock.turn),
+        });
+    }
+
+    /// Binds act on key-down only, and only when no modifier is held, so a
+    /// typed letter in a widget cannot hide the panel.
+    fn readKeys(self: *App) void {
+        for (dvui.events()) |*event| {
+            if (event.handled) continue;
+            switch (event.evt) {
+                .key => |key| {
+                    if (!self.hidesPanel(key)) continue;
+                    self.ui_hidden = !self.ui_hidden;
+                    event.handled = true;
+                },
+                else => {},
+            }
+        }
+    }
+
+    /// Key-down with no modifier held. Typing the bound letter into a widget
+    /// has a modifier or is not a key-down, so it cannot hide the panel.
+    fn hidesPanel(self: *const App, key: dvui.Event.Key) bool {
+        return key.action == .down and key.mod == .none and key.code == self.binds.toggle_ui;
     }
 
     fn setError(self: *App, message: []const u8) void {
