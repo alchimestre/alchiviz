@@ -40,8 +40,8 @@ pub const Knob = enum {
             .lanes =>
             "Lanes per e-fold of radius: how tightly the rings are packed between the middle and " ++
                 "the rim. Few lanes give fat rings, many give a fine tunnel. With the tunnel fold " ++
-                "the bands stay the same width as they get denser; with rings and branches each " ++
-                "ring widens outward, so this slider sets how many copies the frame is cut into.",
+                "the bands stay the same width as they get denser; with rings each ring widens " ++
+                "outward, so this slider sets how many copies the frame is cut into.",
             .colour =>
             "Slides the whole heat ramp around the colour wheel, keeping every column's place in " ++
                 "it. Left leaves the ramp as it is; right takes it once round and back, so the cold " ++
@@ -51,7 +51,7 @@ pub const Knob = enum {
                 "column into its neighbours, so hard column edges become gradients. The fold " ++
                 "magnifies the middle, so a little here goes a long way there.",
             .mirror =>
-            "The kaleidoscope's facet count, in whole numbers from two to sixteen. It only shows " ++
+            "The kaleidoscope's facet count, in whole numbers from two to thirty-two. It only shows " ++
                 "while the mirrors stage is on. The count divides the full turn, so every facet " ++
                 "shows the same slice of the frame reflected at its edges.",
             .gate =>
@@ -61,11 +61,10 @@ pub const Knob = enum {
                 "fade into the tunnel instead of blinking out. The track runs to 1.0, so at the " ++
                 "right end the whole frame is attenuated, the loudest columns included. Left is off.",
             .kick =>
-            "A ceiling on how much of a captured hit reaches the fold, from nothing at the left to " ++
-                "the whole hit at the right. The capture fires a kick when the low band spikes " ++
-                "above the smoothed level; this passes that firing on in proportion, so the left " ++
-                "end holds the rings still against the music. It only acts while the kick stage is " ++
-                "on.",
+            "How hard a captured hit throws the tunnel, from a still picture at the left to the " ++
+                "whole punch at the right. The capture fires a kick when the low band spikes above " ++
+                "the smoothed level; this scales what that hit does to the rings and to the " ++
+                "window, and leaves the stage itself open.",
         };
     }
 };
@@ -86,10 +85,6 @@ pub fn lawDescription(law: dmt.Fold) []const u8 {
         "Radius taken straight. Each ring is wider than the one inside it, so the frame repeats " ++
             "as copies that grow outward from the middle instead of receding into it. Alternate " ++
             "rings are still reflected, which is what makes neighbouring copies mirror each other.",
-        .branches =>
-        "Radius taken straight with the reflection removed: every ring points the same way, so " ++
-            "the frame's own bands run out from the middle and the lanes read as branching rather " ++
-            "than copying. Picking this law also switches the facets off.",
     };
 }
 

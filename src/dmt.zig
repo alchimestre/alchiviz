@@ -29,31 +29,28 @@ pub const Fold = enum {
     /// Linear radius, so each ring is wider than the one inside it and the
     /// frame reads as copies of itself expanding from the middle.
     rings,
-    /// The rings law without the reflection every other ring carries, so the
-    /// frame's own lanes run straight out from the middle.
-    branches,
 };
 
 /// The radius the rest of the fold measures rings in.
 fn depthRadius(kind: Fold, radius: f32, half: f32) f32 {
     return switch (kind) {
         .tunnel => @log(radius / half + 0.01),
-        .rings, .branches => radius / half,
+        .rings => radius / half,
     };
 }
 
-/// The band a ring shows. Tunnel and rings reflect every other ring, so the
-/// picture mirrors from the middle outwards; branches runs them straight, so
-/// the frame's lanes continue outward instead of changing direction.
-fn foldBand(kind: Fold, level: f32, within: f32) f32 {
-    const eased = bandWithin(within);
-    return if (kind == .branches) eased else ringBand(level, eased);
+/// The band a ring shows: every other ring is reflected, so the picture mirrors
+/// from the middle outwards.
+fn foldBand(level: f32, within: f32) f32 {
+    return ringBand(level, bandWithin(within));
 }
 
 /// Everything the audio drives.
 pub const FoldShape = struct {
     ring_count: f32 = rings_default,
     heart: f32 = 0,
+    /// How hard the captured hit pushes the fold, 0 to 1: the kick slider.
+    pump: f32 = 1,
     mirrors: f32 = 4,
     fold: Fold = .tunnel,
 };
@@ -88,7 +85,7 @@ pub const kick_track: Track = .{ .min = 0, .max = 1 };
 const kick_push: f32 = 0.8;
 
 /// Rings the loudness adds on top of the lanes slider.
-const ring_push: f32 = 2.2;
+const ring_push: f32 = 1.1;
 
 /// What the beat adds to the fold.
 pub const Beat = struct {
@@ -104,17 +101,17 @@ pub const Beat = struct {
 /// kick stage answers bass and nothing else; `kick` is the captured hit.
 /// Switched off, every term is neutral, so the picture no longer moves with the
 /// music at all.
-pub fn beat(low: f32, kick: f32, enabled: bool) Beat {
+pub fn beat(low: f32, kick: f32, pump: f32, enabled: bool) Beat {
     if (!enabled) return .{};
     return .{
         .rings = ring_push * low,
-        .pump = kick * window_pump,
+        .pump = kick * window_pump * pump,
         .pace = 0.6 + 1.4 * low,
     };
 }
 
 /// Rings per e-fold of radius: the default granularity of the tunnel.
-pub const rings_default: f32 = 2.2;
+pub const rings_default: f32 = 1.1;
 
 /// Radians of spin per unit of the clock's turn: the sweep the lanes make.
 const spin_rate: f32 = 3;
@@ -209,10 +206,10 @@ pub fn virtualSize(base: dvui.Size.Physical, scale: f32) dvui.Size.Physical {
 
 /// Lane count: few wide lanes at the bottom of the track, many thin ones at the
 /// top.
-pub const rings_track: Track = .{ .min = 0.9, .max = 7 };
+pub const rings_track: Track = .{ .min = 0.45, .max = 3.5 };
 
 /// Kaleidoscope facets.
-pub const mirrors_track: Track = .{ .min = 2, .max = 16, .whole = true };
+pub const mirrors_track: Track = .{ .min = 2, .max = 32, .whole = true };
 
 /// Vertex every this many physical pixels. Mirror seams are sharp, so the grid
 /// has to be fine.
@@ -298,7 +295,7 @@ pub fn fold(
     const angle0 = std.math.atan2(q.y, q.x);
     const depth = depth_radius * view.ring_count - view.rush_phase - view.heart * view.kick_push;
     const level = @floor(depth);
-    const band = foldBand(view.fold, level, depth - level);
+    const band = foldBand(level, depth - level);
 
     // Spin turns the whole sampling frame, so the seams and the facets sweep
     // around the middle. It comes before the mirror fold, or the two sides of
@@ -374,7 +371,7 @@ pub fn lens(clock: Clock, shape: FoldShape, toggles: stages.Toggles) Lens {
         .turn_phase = if (spinning) @floatCast(clock.turn * speed) else 0,
         .ring_count = shape.ring_count,
         .heart = if (pushing) shape.heart else 0,
-        .kick_push = if (pushing) kick_push else 0,
+        .kick_push = if (pushing) kick_push * shape.pump else 0,
         .mirrors = if (toggles.enabled(.mirrors)) shape.mirrors else 1,
         .spin_rate = if (spinning) spin_rate else 0,
         .spin = spin,
@@ -833,22 +830,21 @@ test "the lane and mirror sliders change where the fold samples" {
 
 
 test "the beat leaves the fold steady when the kick stage is off" {
-    const off = beat(1, 1, false);
+    const off = beat(1, 1, 1, false);
     try std.testing.expectEqual(@as(f32, 0), off.rings);
     try std.testing.expectEqual(@as(f32, 0), off.pump);
     try std.testing.expectEqual(@as(f32, 1), off.pace);
 
-    const on = beat(1, 1, true);
+    const on = beat(1, 1, 1, true);
     try std.testing.expect(on.rings > 0);
     try std.testing.expect(on.pump > 0);
     try std.testing.expect(on.pace > 1);
 }
 
-test "branches runs the lanes straight where rings reflects them" {
+test "every other ring is reflected" {
     const across_ring = 0.3;
-    try std.testing.expectApproxEqAbs(foldBand(.rings, 0, across_ring), foldBand(.rings, 2, across_ring), 0.0001);
-    try std.testing.expectApproxEqAbs(1 - foldBand(.rings, 0, across_ring), foldBand(.rings, 1, across_ring), 0.0001);
-    try std.testing.expectApproxEqAbs(foldBand(.branches, 0, across_ring), foldBand(.branches, 1, across_ring), 0.0001);
+    try std.testing.expectApproxEqAbs(foldBand(0, across_ring), foldBand(2, across_ring), 0.0001);
+    try std.testing.expectApproxEqAbs(1 - foldBand(0, across_ring), foldBand(1, across_ring), 0.0001);
 }
 
 test "the rings fold expands outward where the tunnel recedes" {

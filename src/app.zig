@@ -93,7 +93,7 @@ pub const App = struct {
     virtual_base: ?dvui.Size.Physical = null,
     lane_rings: f32 = dmt.rings_default,
     lane_mirrors: f32 = 4,
-    kick_pass: f32 = 1,
+    kick_pump: f32 = 1,
     lane_colour: f32 = 0,
     blur: f32 = 0,
     gate: f32 = 0,
@@ -277,7 +277,7 @@ pub const App = struct {
         const levels = self.levels;
         // Everything the beat does to the fold hangs off the kick stage, so
         // switching kick off leaves the picture steady against the music.
-        const beat = dmt.beat(levels.low_level, self.hit(), self.toggles.kick);
+        const beat = dmt.beat(levels.low_level, levels.kick, self.kick_pump, self.toggles.kick);
         // The fold is laid out on the window it opened in, scaled by the window
         // slider and breathing with the wander and the kick.
         const swell = @max(0.2, 1 + dmt.wander(self.elapsed, self.window_wander_limit) + beat.pump);
@@ -286,7 +286,8 @@ pub const App = struct {
         // swap.
         const view = dmt.lens(self.clock, .{
             .ring_count = std.math.clamp(self.lane_rings + beat.rings, dmt.rings_track.min, dmt.rings_track.max),
-            .heart = self.hit(),
+            .heart = self.levels.kick,
+            .pump = self.kick_pump,
             .mirrors = self.lane_mirrors,
             .fold = self.fold_kind,
         }, self.toggles);
@@ -468,8 +469,8 @@ pub const App = struct {
         if (self.sliderRow(.gate, dmt.gate_track.fraction(self.gate), 80)) |fraction| {
             self.gate = dmt.gate_track.value(fraction);
         }
-        if (self.sliderRow(.kick, dmt.kick_track.fraction(self.kick_pass), 90)) |fraction| {
-            self.kick_pass = dmt.kick_track.value(fraction);
+        if (self.sliderRow(.kick, dmt.kick_track.fraction(self.kick_pump), 90)) |fraction| {
+            self.kick_pump = dmt.kick_track.value(fraction);
         }
 
         self.keepFlat(0, pane.data().rectScaleFromParent().r);
@@ -547,8 +548,7 @@ pub const App = struct {
             if (item.activeRect() != null) {
                 // Branches is the fold without a mirror, so picking it drops
                 // the facets rather than leaving a tick that cannot show.
-                if (law != self.fold_kind and law == .branches) self.toggles.mirrors = false;
-                self.fold_kind = law;
+                    self.fold_kind = law;
                 picker.close();
             }
         }
@@ -713,11 +713,6 @@ pub const App = struct {
         return if (moved) fraction else null;
     }
 
-    /// The captured hit, limited by the kick slider.
-    fn hit(self: *const App) f32 {
-        return self.levels.kick * self.kick_pass;
-    }
-
     /// Move the clock with the capture and follow its loudness.
     fn pump(self: *App) void {
         const now = std.Io.Clock.awake.now(self.io).nanoseconds;
@@ -731,7 +726,7 @@ pub const App = struct {
         self.elapsed += step;
         // The tunnel keeps moving through silence; only its speed follows the
         // capture.
-        const beat = dmt.beat(self.levels.low_level, self.hit(), self.toggles.kick);
+        const beat = dmt.beat(self.levels.low_level, self.levels.kick, self.kick_pump, self.toggles.kick);
         self.clock.advance(step * self.effect_speed * beat.pace, dmt.mood(self.elapsed));
 
         const ring = if (self.ring) |*value| value else return;

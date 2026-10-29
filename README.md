@@ -48,9 +48,9 @@ Input is compressed and lifted before it reaches the picture, so a quiet microph
 | `lanes` | lanes per e-fold of radius |
 | `colour` | slides the whole heat ramp around the colour wheel |
 | `blur` | the soften pass over the columns |
-| `mirror` | kaleidoscope facets |
+| `mirror` | kaleidoscope facets, two to thirty-two |
 | `gate` | how hard quiet columns are pulled down |
-| `kick` | the ceiling on a captured hit, from none at the left to the whole hit at the right |
+| `kick` | how hard a captured hit throws the tunnel, from still at the left to full punch at the right |
 
 ### Gate
 
@@ -68,7 +68,7 @@ The right panel is the fold, one toggle per stage, in the order a screen point g
 | `stagger` | starts each lane at its own point of the sweep | every lane shows the same band |
 | `kick` | everything the beat does: pushes the rings out, adds lanes, widens the window, hurries the clock | the fold stops moving with the music |
 
-The `fold` row also has a dropdown for the radial law. `tunnel` takes the log radius, so rings keep their screen thickness and the picture recedes. `rings` takes the radius straight, so each copy is wider than the one inside it and the frame expands outward from the middle. `branches` is `rings` without the reflection on every other ring, so the frame's lanes run straight out from the middle. The tick beside the dropdown switches the whole fold off.
+The `fold` row also has a dropdown for the radial law. `tunnel` takes the log radius, so rings keep their screen thickness and the picture recedes. `rings` takes the radius straight, so each copy is wider than the one inside it and the frame expands outward from the middle. The tick beside the dropdown switches the whole fold off.
 
 ## Rendering
 
