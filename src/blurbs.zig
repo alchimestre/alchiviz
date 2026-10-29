@@ -61,11 +61,11 @@ pub const Knob = enum {
                 "fade into the tunnel instead of blinking out. The track runs to 1.0, so at the " ++
                 "right end the whole frame is attenuated, the loudest columns included. Left is off.",
             .kick =>
-            "How much of a captured hit reaches the fold, as a multiplier from 0 to 6. The " ++
-                "capture fires a kick when the low band spikes above the smoothed level; this " ++
-                "scales that firing before the beat sees it, so the low end needs a hard hit to " ++
-                "move anything and the high end throws the rings on the smallest one. It only acts " ++
-                "while the kick stage is on.",
+            "A ceiling on how much of a captured hit reaches the fold, from nothing at the left to " ++
+                "the whole hit at the right. The capture fires a kick when the low band spikes " ++
+                "above the smoothed level; this passes that firing on in proportion, so the left " ++
+                "end holds the rings still against the music. It only acts while the kick stage is " ++
+                "on.",
         };
     }
 };

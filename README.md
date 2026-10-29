@@ -50,7 +50,7 @@ Input is compressed and lifted before it reaches the picture, so a quiet microph
 | `blur` | the soften pass over the columns |
 | `mirror` | kaleidoscope facets |
 | `gate` | how hard quiet columns are pulled down |
-| `kick` | how much of a captured hit reaches the fold, 0 to 6 |
+| `kick` | the ceiling on a captured hit, from none at the left to the whole hit at the right |
 
 ### Gate
 

@@ -80,9 +80,9 @@ const calm: f32 = 1.5;
 /// top of the track attenuates the whole frame.
 pub const gate_track: Track = .{ .min = 0, .max = 1 };
 
-/// How much of a captured hit reaches the fold, as a multiplier on the capture's
-/// own kick.
-pub const kick_track: Track = .{ .min = 0, .max = 6 };
+/// The ceiling on a captured hit: how much of the capture's own kick reaches the
+/// fold. At the right end the hit passes whole; at the left it is blocked.
+pub const kick_track: Track = .{ .min = 0, .max = 1 };
 
 /// How far one kick pushes the rings outward, in ring widths.
 const kick_push: f32 = 0.8;
