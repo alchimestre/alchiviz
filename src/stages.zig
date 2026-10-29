@@ -47,9 +47,10 @@ pub const Stage = enum {
                 "every lane sample the same band, which collapses the tunnel into one repeating " ++
                 "picture.",
             .kick =>
-            "Pushes the rings outward on each beat, scaled by the loudness the capture reports, " ++
-                "so a hit moves the whole tunnel a ring forward. Off keeps the expansion even " ++
-                "with no punch on the beat.",
+            "Moves the tunnel with the bass. The rings breathe and the clock hurries on the low " ++
+                "band, and each captured hit pushes the rings outward on top of that, so mids and " ++
+                "highs leave the fold alone. Off keeps the expansion even, with no punch and no " ++
+                "haste on the beat.",
         };
     }
 };
