@@ -100,15 +100,16 @@ pub const Beat = struct {
     pace: f32 = 1,
 };
 
-/// The beat's whole grip on the fold. `loudness` is the smoothed level, `kick`
-/// the captured hit. Switched off, every term is neutral, so the picture no
-/// longer moves with the music at all.
-pub fn beat(loudness: f32, kick: f32, enabled: bool) Beat {
+/// The beat's whole grip on the fold. `low` is the smoothed low band, so the
+/// kick stage answers bass and nothing else; `kick` is the captured hit.
+/// Switched off, every term is neutral, so the picture no longer moves with the
+/// music at all.
+pub fn beat(low: f32, kick: f32, enabled: bool) Beat {
     if (!enabled) return .{};
     return .{
-        .rings = ring_push * loudness,
+        .rings = ring_push * low,
         .pump = kick * window_pump,
-        .pace = 0.6 + 1.4 * loudness,
+        .pace = 0.6 + 1.4 * low,
     };
 }
 

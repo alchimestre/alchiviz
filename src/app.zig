@@ -21,6 +21,33 @@ fn maybeStills(hidden: bool, stills: []const dvui.Rect.Physical) []const dvui.Re
     return if (hidden) &.{} else stills;
 }
 
+/// One swatch of the colour bar. Explicit rect, so the cells stack over each
+/// other instead of taking positions from the box's layout.
+fn paintCell(id: u32, extra: u32, rect: struct { x: f32, w: f32, h: f32 }, colour: wave.Color) void {
+    var cell: dvui.BoxWidget = undefined;
+    cell.init(@src(), .{ .dir = .horizontal }, .{
+        .id_extra = id + extra,
+        .rect = .{
+            .x = rect.x,
+            .y = 0,
+            .w = rect.w,
+            .h = rect.h,
+        },
+        .padding = .{},
+        .margin = .{},
+        .background = true,
+        .border = .{},
+        .color_fill = .{ .color = dvui.Color{
+            .r = colour.r,
+            .g = colour.g,
+            .b = colour.b,
+            .a = colour.a,
+        } },
+    });
+    cell.drawBackground();
+    cell.deinit();
+}
+
 fn inside(rect: dvui.Rect.Physical, point: dvui.Point.Physical) bool {
     return point.x >= rect.x and point.x < rect.x + rect.w and
         point.y >= rect.y and point.y < rect.y + rect.h;
@@ -250,7 +277,7 @@ pub const App = struct {
         const levels = self.levels;
         // Everything the beat does to the fold hangs off the kick stage, so
         // switching kick off leaves the picture steady against the music.
-        const beat = dmt.beat(levels.level, self.hit(), self.toggles.kick);
+        const beat = dmt.beat(levels.low_level, self.hit(), self.toggles.kick);
         // The fold is laid out on the window it opened in, scaled by the window
         // slider and breathing with the wander and the kick.
         const swell = @max(0.2, 1 + dmt.wander(self.elapsed, self.window_wander_limit) + beat.pump);
@@ -429,7 +456,7 @@ pub const App = struct {
         if (self.sliderRow(.lanes, dmt.rings_track.fraction(self.lane_rings), 40)) |fraction| {
             self.lane_rings = dmt.rings_track.value(fraction);
         }
-        if (self.sliderRow(.colour, self.lane_colour, 50)) |fraction| {
+        if (self.colourBar(self.lane_colour, 50)) |fraction| {
             self.lane_colour = fraction;
         }
         if (self.sliderRow(.blur, self.blur, 60)) |fraction| {
@@ -566,6 +593,95 @@ pub const App = struct {
         };
     }
 
+    /// The colour control: a bar painted with the whole hue wheel, so the row
+    /// reads as colour before it is touched, and the handle sits at the hue in
+    /// use. Same row as `sliderRow`, but dvui's slider paints its own track and
+    /// cannot show a gradient.
+    fn colourBar(self: *App, start: f32, id: u32) ?f32 {
+        const width = 160;
+        const height = 14;
+        const cells = 32;
+        const handle_width = 3;
+
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .id_extra = id,
+            .min_size_content = .{ .h = 22 },
+        });
+        defer row.deinit();
+
+        if (inside(row.data().rectScaleFromParent().r, dvui.currentWindow().mouse_pt)) {
+            self.blurb_focus = .{ .knob = .colour };
+        }
+
+        dvui.labelNoFmt(@src(), blurbs.Knob.colour.label(), .{}, .{
+            .font = .theme(.body),
+            .color_text = .{ .color = ink },
+            .gravity_y = 0.5,
+            .min_size_content = .{ .w = 64 },
+            .id_extra = id + 1,
+        });
+
+        var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .id_extra = id + 2,
+            .gravity_y = 0.5,
+            .min_size_content = .{ .w = width, .h = height },
+            .max_size_content = .{ .w = width, .h = height },
+            .padding = .{},
+            .margin = .{},
+        });
+        defer bar.deinit();
+
+        // A widget's `rect` is natural pixels and the box's own rect is still
+        // the parent's spare width while it is built, so the bar is painted from
+        // the size it was declared with.
+        const span: f32 = @floatFromInt(width);
+        const tall: f32 = @floatFromInt(height);
+        const cell_width = span / @as(f32, @floatFromInt(cells));
+        for (0..cells) |cell| {
+            const turns = (@as(f32, @floatFromInt(cell)) + 0.5) / @as(f32, @floatFromInt(cells));
+            paintCell(id, 3 + @as(u32, @intCast(cell)), .{
+                .x = cell_width * @as(f32, @floatFromInt(cell)),
+                .w = cell_width,
+                .h = tall,
+            }, wave.spectrum(turns));
+        }
+        const grip: f32 = @floatFromInt(handle_width);
+        paintCell(id, 3 + @as(u32, @intCast(cells)), .{
+            .x = std.math.clamp(start, 0, 1) * (span - grip),
+            .w = grip,
+            .h = tall,
+        }, .{ .r = 0xff, .g = 0xff, .b = 0xff, .a = 0xff });
+
+        return colourDrag(bar, span * bar.data().rectScale().s);
+    }
+
+    /// Press-and-drag over the bar, the way dvui's own slider reads it.
+    fn colourDrag(bar: *dvui.BoxWidget, width: f32) ?f32 {
+        const rs = bar.data().rectScale();
+        var moved: ?f32 = null;
+        for (dvui.events()) |*e| {
+            if (!dvui.eventMatch(e, .{ .id = bar.data().id, .r = rs.r })) continue;
+            switch (e.evt) {
+                .mouse => |me| {
+                    if (me.action == .press and me.button.pointer()) {
+                        dvui.captureMouse(bar.data(), e.num);
+                        e.handle(@src(), bar.data());
+                        moved = me.p.x;
+                    } else if (me.action == .motion and dvui.captured(bar.data().id)) {
+                        e.handle(@src(), bar.data());
+                        moved = me.p.x;
+                    } else if (me.action == .release and me.button.pointer() and dvui.captured(bar.data().id)) {
+                        dvui.captureMouse(null, e.num);
+                        e.handle(@src(), bar.data());
+                    }
+                },
+                else => {},
+            }
+        }
+        const x = moved orelse return null;
+        return std.math.clamp((x - rs.r.x) / width, 0, 1);
+    }
+
     /// A label with a slider beside it. Returns the new position only when the
     /// slider moved.
     fn sliderRow(self: *App, knob: blurbs.Knob, start: f32, id: u32) ?f32 {
@@ -615,7 +731,7 @@ pub const App = struct {
         self.elapsed += step;
         // The tunnel keeps moving through silence; only its speed follows the
         // capture.
-        const beat = dmt.beat(self.levels.level, self.hit(), self.toggles.kick);
+        const beat = dmt.beat(self.levels.low_level, self.hit(), self.toggles.kick);
         self.clock.advance(step * self.effect_speed * beat.pace, dmt.mood(self.elapsed));
 
         const ring = if (self.ring) |*value| value else return;

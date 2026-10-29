@@ -188,12 +188,14 @@ pub fn column(ring: *const Ring, from: usize, to: usize, radius: usize) Column {
     };
 }
 
-/// What the fold reacts to: a normalised loudness, a slow reference that keeps
-/// quiet passages moving the rings, and a kick that fires when the low band
-/// jumps above its own average.
+/// What the fold reacts to: a normalised loudness, the same for the low band
+/// alone, a slow reference that keeps quiet passages moving the rings, and a
+/// kick that fires when the low band jumps above its own average.
 pub const Levels = struct {
     level: f32 = 0,
+    low_level: f32 = 0,
     reference: f32 = 0.08,
+    low_reference: f32 = 0.05,
     low_average: f32 = 0,
     kick: f32 = 0,
 
@@ -213,6 +215,12 @@ pub const Levels = struct {
         const relative = @min(1, newest.peak / self.reference);
         self.level += (relative - self.level) * (1 - retention(dt, level_seconds));
 
+        // The beat follows the low band, so a hat or a vocal cannot move the
+        // tunnel the way a bass note does.
+        self.low_reference = @max(newest.low, self.low_reference * retention(dt, reference_seconds));
+        const low_relative = @min(1, newest.low / self.low_reference);
+        self.low_level += (low_relative - self.low_level) * (1 - retention(dt, level_seconds));
+
         self.low_average += (newest.low - self.low_average) * (1 - retention(dt, low_seconds));
         const excess = @max(0, newest.low - self.low_average * 1.05);
         self.kick = @max(self.kick * retention(dt, kick_seconds), @min(1, excess * 4));
@@ -223,6 +231,7 @@ pub const Levels = struct {
     pub fn silence(self: *Levels, dt: f32) void {
         const keep = retention(dt, silence_seconds);
         self.level *= keep;
+        self.low_level *= keep;
         self.kick *= keep;
     }
 };
@@ -370,6 +379,28 @@ test "a low-band spike fires the kick and fades" {
     step = 0;
     while (step < 20) : (step += 1) levels.update(quiet, dt);
     try std.testing.expect(levels.kick < fired);
+}
+
+test "the beat's level drops when the bass does, however loud the rest is" {
+    var levels: Levels = .{};
+    const dt: f32 = 1.0 / 60.0;
+    const grooving = Column{ .peak = 0.5, .body = 0.4, .mid = 0.3, .high = 0.3, .low = 0.5 };
+    var step: usize = 0;
+    while (step < 240) : (step += 1) levels.update(grooving, dt);
+    try std.testing.expect(levels.low_level > 0.9);
+
+    // The bass stops and a wall of mids and highs takes its place. The capture
+    // is louder than before, so a full-band beat would speed up, not calm down.
+    const bright = Column{ .peak = 1, .body = 0.9, .mid = 1, .high = 1, .low = 0 };
+    step = 0;
+    while (step < 40) : (step += 1) levels.update(bright, dt);
+    try std.testing.expect(levels.level > 0.8);
+    try std.testing.expect(levels.low_level < 0.2);
+
+    // The bass comes back.
+    step = 0;
+    while (step < 40) : (step += 1) levels.update(grooving, dt);
+    try std.testing.expect(levels.low_level > 0.8);
 }
 
 test "the level follows the capture and settles in silence" {

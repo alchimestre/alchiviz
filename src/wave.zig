@@ -36,6 +36,12 @@ pub fn hueShift(colour: Color, turns: f32) Color {
     return fromHsv(shifted, saturation, high, colour.a);
 }
 
+/// The hue one `turns` of a full revolution around the wheel, at full strength:
+/// the paint for the colour bar.
+pub fn spectrum(turns: f32) Color {
+    return fromHsv(turns, 0.85, 0.95, 0xff);
+}
+
 fn fromHsv(hue: f32, saturation: f32, value: f32, alpha: u8) Color {
     const sector = @mod(hue, 1) * 6;
     const offset = sector - @floor(sector);
