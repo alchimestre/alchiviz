@@ -66,7 +66,7 @@ pub const App = struct {
     virtual_base: ?dvui.Size.Physical = null,
     lane_rings: f32 = dmt.rings_default,
     lane_mirrors: f32 = 4,
-    kick_sensitivity: f32 = 1,
+    kick_pass: f32 = 1,
     lane_colour: f32 = 0,
     blur: f32 = 0,
     gate: f32 = 0,
@@ -441,8 +441,8 @@ pub const App = struct {
         if (self.sliderRow(.gate, dmt.gate_track.fraction(self.gate), 80)) |fraction| {
             self.gate = dmt.gate_track.value(fraction);
         }
-        if (self.sliderRow(.kick, dmt.kick_track.fraction(self.kick_sensitivity), 90)) |fraction| {
-            self.kick_sensitivity = dmt.kick_track.value(fraction);
+        if (self.sliderRow(.kick, dmt.kick_track.fraction(self.kick_pass), 90)) |fraction| {
+            self.kick_pass = dmt.kick_track.value(fraction);
         }
 
         self.keepFlat(0, pane.data().rectScaleFromParent().r);
@@ -597,9 +597,9 @@ pub const App = struct {
         return if (moved) fraction else null;
     }
 
-    /// The captured hit, scaled by the kick slider.
+    /// The captured hit, limited by the kick slider.
     fn hit(self: *const App) f32 {
-        return self.levels.kick * self.kick_sensitivity;
+        return self.levels.kick * self.kick_pass;
     }
 
     /// Move the clock with the capture and follow its loudness.
