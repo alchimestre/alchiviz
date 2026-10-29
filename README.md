@@ -88,7 +88,7 @@ Keybinds live in `$XDG_CONFIG_HOME/alchiviz/keys.conf`, or `~/.config/alchiviz/k
 h = toggle-ui
 ```
 
-Keys are the names dvui uses: `a` to `z`, `0` to `9`, `escape`, `space`, `f1` to `f12`.
+Keys are the names dvui uses: `a` to `z`, `zero` to `nine`, `escape`, `space`, `f1` to `f25`.
 
 ## Input
 
