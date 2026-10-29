@@ -94,6 +94,7 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
 
 pub const Input = struct {
     stream: ?*sdl.SDL_AudioStream = null,
+    agc: signal.Agc = .{},
     rate: f32 = @floatFromInt(sample_rate),
     channels: usize = 1,
 
@@ -146,7 +147,8 @@ pub const Input = struct {
             while (at + self.channels <= samples) : (at += self.channels) {
                 var sum: f32 = 0;
                 for (buffer[at .. at + self.channels]) |value| sum += value;
-                ring.push(sum / @as(f32, @floatFromInt(self.channels)));
+                const mixed = sum / @as(f32, @floatFromInt(self.channels));
+                ring.push(self.agc.process(mixed, @floatFromInt(sample_rate)));
             }
 
             if (@as(usize, @intCast(got)) < wanted) break;

@@ -15,6 +15,35 @@ pub const history_seconds: f32 = 2;
 const low_cutoff: f32 = 150;
 const mid_cutoff: f32 = 2000;
 
+/// Automatic gain control: a compressor with makeup, so a quiet microphone
+/// and a loud mix arrive at the same loudness range. The level is followed
+/// upward quickly and released slowly, and the boost is capped so silence is
+/// not amplified into hiss.
+pub const Agc = struct {
+    /// Seconds to follow a louder passage up.
+    attack: f32 = 0.004,
+    /// Seconds to let go after it.
+    release: f32 = 0.35,
+    /// Linear amplitude the output is pushed toward.
+    target: f32 = 0.3,
+    /// Largest boost applied to a quiet input.
+    ceiling: f32 = 20,
+    level: f32 = 0,
+
+    pub fn process(self: *Agc, sample: f32, rate: f32) f32 {
+        const magnitude = @abs(sample);
+        const seconds = if (magnitude > self.level) self.attack else self.release;
+        const follow = 1 - @exp(-1 / @max(1e-4, seconds * rate));
+        self.level += (magnitude - self.level) * follow;
+
+        const gain = if (self.level > 1e-5)
+            @min(self.ceiling, self.target / self.level)
+        else
+            1;
+        return std.math.clamp(sample * gain, -1, 1);
+    }
+};
+
 pub const Ring = struct {
     samples: []f32,
     low: []f32,
@@ -222,6 +251,33 @@ fn onePole(state: *f32, input: f32, coefficient: f32) f32 {
 fn sine(rate: f32, hz: f32, at: usize) f32 {
     const phase = std.math.tau * hz * @as(f32, @floatFromInt(at)) / rate;
     return @sin(phase);
+}
+
+test "the automatic gain lifts quiet input and tames loud input" {
+    var quiet: Agc = .{};
+    var loud: Agc = .{};
+    var quiet_peak: f32 = 0;
+    var loud_peak: f32 = 0;
+
+    for (0..4800) |index| {
+        const seconds = @as(f32, @floatFromInt(index)) / 48000.0;
+        const wave = @sin(seconds * 440 * std.math.tau);
+        const lifted = quiet.process(wave * 0.02, 48000);
+        if (index > 2400) quiet_peak = @max(quiet_peak, @abs(lifted));
+        loud_peak = @max(loud_peak, @abs(loud.process(wave * 4, 48000)));
+    }
+
+    // A quiet input is pushed well above where it came in.
+    try std.testing.expect(quiet_peak > 0.06);
+    // A loud one comes out inside the frame, not clipped into a square wave.
+    try std.testing.expect(loud_peak <= 1);
+}
+
+test "the automatic gain leaves silence silent" {
+    var agc: Agc = .{};
+    for (0..4800) |_| {
+        try std.testing.expectEqual(@as(f32, 0), agc.process(0, 48000));
+    }
 }
 
 test "the ring hands back the newest samples in order" {

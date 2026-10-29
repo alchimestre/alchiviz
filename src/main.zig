@@ -3,6 +3,7 @@
 const std = @import("std");
 const dvui = @import("dvui");
 const SDLBackend = @import("sdl-backend");
+const gpu = @import("gpu.zig");
 const audio = @import("audio.zig");
 const tap = @import("tap.zig");
 const App = @import("app.zig").App;
@@ -36,7 +37,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn run(init: std.process.Init, device: ?[]const u8) !void {
-    var app = try App.init(init.gpa, init.io, device);
+    var app = try App.init(init.gpa, init.io, init.environ_map, device);
     errdefer app.deinit();
 
     if (device) |needle| {
@@ -57,6 +58,14 @@ fn run(init: std.process.Init, device: ?[]const u8) !void {
         .title = "alchiviz",
     });
     defer backend.deinit();
+
+    var painter: ?gpu.Painter = gpu.Painter.init(&backend) catch |err| blk: {
+        app.gpu_message = std.mem.sliceTo(&gpu.last_error, 0);
+        std.debug.print("[gpu] tunnel stays on the CPU ({s})\n", .{@errorName(err)});
+        break :blk null;
+    };
+    defer if (painter) |*running| running.deinit();
+    app.painter = if (painter) |*running| running else null;
     // Registered after the backend so it runs before it: destroying the stream
     // after SDL_Quit walks a freed audio device.
     defer app.deinit();
@@ -74,6 +83,10 @@ fn run(init: std.process.Init, device: ?[]const u8) !void {
         try win.begin(frame_start);
         if (try backend.addAllEvents(&win)) break;
 
+        app.gpu_frame = .{
+            .cmd = backend.cmd,
+            .swapchain = backend.swapchain_texture,
+        };
         app.frame();
         const frame_end = try win.end(.{});
 
