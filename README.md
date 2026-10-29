@@ -46,11 +46,11 @@ Input is compressed and lifted before it reaches the picture, so a quiet microph
 | `wander` | how far the virtual window breathes, which changes how many lanes fit on screen |
 | `window` | the virtual window's own scale, from the real window at the left to six times it at the right |
 | `lanes` | lanes per e-fold of radius |
-| `colour` | how far the frame's colours open up from grey |
+| `colour` | slides the whole heat ramp around the colour wheel |
 | `blur` | the soften pass over the columns |
 | `mirror` | kaleidoscope facets |
 | `gate` | how hard quiet columns are pulled down |
-| `kick` | how much of a captured hit reaches the fold, 0 to 10 |
+| `kick` | how much of a captured hit reaches the fold, 0 to 6 |
 
 ### Gate
 
@@ -66,7 +66,6 @@ The right panel is the fold, one toggle per stage, in the order a screen point g
 | `spin` | turns the sampling frame with the clock | fixed frame |
 | `mirrors` | kaleidoscope facets, count from the `mirror` slider | one unfolded sample |
 | `stagger` | starts each lane at its own point of the sweep | every lane shows the same band |
-| `twist` | shears the angle by the radius | straight facets |
 | `kick` | everything the beat does: pushes the rings out, adds lanes, widens the window, hurries the clock | the fold stops moving with the music |
 
 The `fold` row also has a dropdown for the radial law. `tunnel` takes the log radius, so rings keep their screen thickness and the picture recedes. `rings` takes the radius straight, so each copy is wider than the one inside it and the frame expands outward from the middle. `branches` is `rings` without the reflection on every other ring, so the frame's lanes run straight out from the middle. The tick beside the dropdown switches the whole fold off.

@@ -43,9 +43,9 @@ pub const Knob = enum {
                 "the bands stay the same width as they get denser; with rings and branches each " ++
                 "ring widens outward, so this slider sets how many copies the frame is cut into.",
             .colour =>
-            "How far the frame's colours open out from grey. Left keeps the heat ramp's own muted " ++
-                "hues; right pushes every column to full chroma. It multiplies after the ramp, so it " ++
-                "never changes which hue a column gets, only how far that hue sits from grey.",
+            "Slides the whole heat ramp around the colour wheel, keeping every column's place in " ++
+                "it. Left leaves the ramp as it is; right takes it once round and back, so the cold " ++
+                "end, the hot end and every band between them change hue together.",
             .blur =>
             "The soften pass over the 240 columns, run before the fold samples them. It smears each " ++
                 "column into its neighbours, so hard column edges become gradients. The fold " ++
@@ -61,7 +61,7 @@ pub const Knob = enum {
                 "fade into the tunnel instead of blinking out. The track runs to 1.0, so at the " ++
                 "right end the whole frame is attenuated, the loudest columns included. Left is off.",
             .kick =>
-            "How much of a captured hit reaches the fold, as a multiplier from 0 to 10. The " ++
+            "How much of a captured hit reaches the fold, as a multiplier from 0 to 6. The " ++
                 "capture fires a kick when the low band spikes above the smoothed level; this " ++
                 "scales that firing before the beat sees it, so the low end needs a hard hit to " ++
                 "move anything and the high end throws the rings on the smallest one. It only acts " ++

@@ -11,22 +11,56 @@ pub const Color = struct { r: u8, g: u8, b: u8, a: u8 = 0xff };
 /// Dracula's window surface, so the fold's dark gaps read as the same frame.
 const background = Color{ .r = 0x0b, .g = 0x0b, .b = 0x12 };
 
-pub fn chroma(colour: Color, amount: f32) Color {
-    if (colour.a == 0) return colour;
-    const luma = 0.299 * @as(f32, @floatFromInt(colour.r)) +
-        0.587 * @as(f32, @floatFromInt(colour.g)) +
-        0.114 * @as(f32, @floatFromInt(colour.b));
+/// Turns a colour through the wheel, `turns` of a full revolution, keeping its
+/// saturation and value. One turn is the identity.
+pub fn hueShift(colour: Color, turns: f32) Color {
+    const r = @as(f32, @floatFromInt(colour.r)) / 255;
+    const g = @as(f32, @floatFromInt(colour.g)) / 255;
+    const b = @as(f32, @floatFromInt(colour.b)) / 255;
+    const high = @max(r, @max(g, b));
+    const low = @min(r, @min(g, b));
+    const span = high - low;
+
+    const hue = if (span == 0) 0 else blk: {
+        const raw = if (high == r)
+            @mod((g - b) / span, 6)
+        else if (high == g)
+            (b - r) / span + 2
+        else
+            (r - g) / span + 4;
+        break :blk raw / 6;
+    };
+    const shifted = @mod(hue + turns, 1);
+    const saturation = if (high == 0) 0 else span / high;
+
+    return fromHsv(shifted, saturation, high, colour.a);
+}
+
+fn fromHsv(hue: f32, saturation: f32, value: f32, alpha: u8) Color {
+    const sector = @mod(hue, 1) * 6;
+    const offset = sector - @floor(sector);
+    const low = value * (1 - saturation);
+    const falling = value * (1 - saturation * offset);
+    const rising = value * (1 - saturation * (1 - offset));
+
+    const channels = switch (@as(u32, @intFromFloat(@floor(sector))) % 6) {
+        0 => .{ value, rising, low },
+        1 => .{ falling, value, low },
+        2 => .{ low, value, rising },
+        3 => .{ low, falling, value },
+        4 => .{ rising, low, value },
+        else => .{ value, low, falling },
+    };
     return .{
-        .r = push(colour.r, luma, amount),
-        .g = push(colour.g, luma, amount),
-        .b = push(colour.b, luma, amount),
-        .a = colour.a,
+        .r = toByte(channels[0]),
+        .g = toByte(channels[1]),
+        .b = toByte(channels[2]),
+        .a = alpha,
     };
 }
 
-fn push(value: u8, luma: f32, amount: f32) u8 {
-    const opened = luma + (@as(f32, @floatFromInt(value)) - luma) * amount;
-    return @intFromFloat(std.math.clamp(opened, 0, 255));
+fn toByte(channel: f32) u8 {
+    return @intFromFloat(std.math.clamp(channel * 255, 0, 255));
 }
 
 /// How the capture is drawn before the fold repeats it.
@@ -41,12 +75,12 @@ pub fn drawSource(
     arena: std.mem.Allocator,
     size: dvui.Size.Physical,
     ring: *const signal.Ring,
-    chroma_amount: f32,
+    hue: f32,
     blur: f32,
     source: Source,
 ) !void {
     if (size.w <= 0 or size.h <= 0) return;
-    try terrain(arena, size, ring, chroma_amount, blur, source);
+    try terrain(arena, size, ring, hue, blur, source);
 }
 
 fn prepare(arena: std.mem.Allocator, ring: *const signal.Ring, blur: f32, columns: usize, gate: f32) ![]signal.Column {
@@ -96,7 +130,7 @@ fn flush(at: Quad, size: dvui.Size.Physical) !void {
 /// again, each layer further back, smaller, dimmer, and shifted sideways by a
 /// wandering noise. The noise is a function of column, layer and time, so a
 /// frame can be reproduced exactly and the wander keeps moving.
-fn terrain(arena: std.mem.Allocator, size: dvui.Size.Physical, ring: *const signal.Ring, chroma_amount: f32, blur: f32, source: Source) !void {
+fn terrain(arena: std.mem.Allocator, size: dvui.Size.Physical, ring: *const signal.Ring, hue: f32, blur: f32, source: Source) !void {
     const columns: usize = 240;
     const layers: usize = 18;
     const stats = try prepare(arena, ring, blur, columns, source.gate);
@@ -129,7 +163,7 @@ fn terrain(arena: std.mem.Allocator, size: dvui.Size.Physical, ring: *const sign
             // one band of them.
             const loudness = @min(1, stat.peak * 0.85 + stat.high * 0.5);
             const sweep = @as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(columns));
-            const shade = chroma(heat(@mod(loudness * 0.7 + t * 0.2 + sweep * 0.45, 1)), chroma_amount);
+            const shade = hueShift(heat(@mod(loudness * 0.7 + t * 0.2 + sweep * 0.45, 1)), hue);
             const color = mul(shade, dim);
             at.append(.{ .x = left, .y = baseline - height, .w = width, .h = height }, color);
         }
@@ -423,25 +457,30 @@ test "blur softens the columns and leaves them alone at zero" {
     try std.testing.expectApproxEqAbs(@as(f32, 32), sum, 3);
 }
 
-test "chroma opens a tint away from its grey and washes it back" {
-    const red = Color{ .r = 240, .g = 60, .b = 60 };
+test "the colour slider slides the ramp through the wheel" {
+    const red = Color{ .r = 200, .g = 40, .b = 40 };
 
-    // Neutral amount changes nothing.
-    const same = chroma(red, 1);
-    try std.testing.expectEqual(red.r, same.r);
-    try std.testing.expectEqual(red.g, same.g);
-    try std.testing.expectEqual(red.b, same.b);
+    // Zero and one turn both land back on the colour, inside rounding.
+    const still = hueShift(red, 0);
+    try expectChannel(red.r, still.r);
+    try expectChannel(red.g, still.g);
+    const turned = hueShift(red, 1);
+    try expectChannel(red.r, turned.r);
+    try expectChannel(red.g, turned.g);
 
-    // Opening pushes the channels apart.
-    const opened = chroma(red, 1.5);
-    try std.testing.expect(opened.r >= red.r);
-    try std.testing.expect(opened.g <= red.g);
+    // A third of a turn takes red to green, two thirds to blue.
+    const green = hueShift(red, 1.0 / 3.0);
+    try std.testing.expect(green.g > green.r and green.g > green.b);
+    const blue = hueShift(red, 2.0 / 3.0);
+    try std.testing.expect(blue.b > blue.r and blue.b > blue.g);
 
-    // Zero lands every channel on the luma, so the bar is grey.
-    const grey = chroma(red, 0);
-    try std.testing.expectEqual(grey.r, grey.g);
-    try std.testing.expectEqual(grey.g, grey.b);
+    // The shift keeps the tint's strength, so the ramp never goes grey or white.
+    try std.testing.expectEqual(red.a, green.a);
+    try std.testing.expect(green.g - green.b > 60);
+    try std.testing.expectEqual(@as(u8, 0), hueShift(.{ .r = 0, .g = 0, .b = 0, .a = 0 }, 0.5).a);
+}
 
-    // Transparent stays transparent: nothing to colour.
-    try std.testing.expectEqual(@as(u8, 0), chroma(.{ .r = 0, .g = 0, .b = 0, .a = 0 }, 2).a);
+/// One step of 8-bit rounding is the most the wheel can cost a channel.
+fn expectChannel(expected: u8, actual: u8) !void {
+    try std.testing.expectApproxEqAbs(@as(f32, @floatFromInt(expected)), @as(f32, @floatFromInt(actual)), 2);
 }

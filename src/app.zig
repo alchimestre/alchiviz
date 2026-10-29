@@ -658,8 +658,7 @@ pub const App = struct {
         defer dvui.clipSet(dvui.currentWindow().rect_pixels);
 
         const ring = if (self.ring) |*value| value else return;
-        const chroma_amount = dmt.chromaLevel(self.lane_colour);
-        try wave.drawSource(arena, size, ring, chroma_amount, self.blur, .{
+        try wave.drawSource(arena, size, ring, self.lane_colour, self.blur, .{
             .gate = self.gate,
             .phase = @floatCast(self.clock.turn),
         });

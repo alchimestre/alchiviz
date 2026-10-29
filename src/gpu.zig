@@ -38,7 +38,6 @@ pub const Uniforms = extern struct {
     turn_phase: f32,
     spin_rate: f32,
     spin: f32,
-    twist: f32,
     ring_shift: f32,
     lane_offset: f32,
     calm: f32,
@@ -84,7 +83,6 @@ const fragment_source =
     \\    float turn_phase;
     \\    float spin_rate;
     \\    float spin;
-    \\    float twist;
     \\    float ring_shift;
     \\    float lane_offset;
     \\    float calm;
@@ -149,9 +147,8 @@ const fragment_source =
     \\        angle = min(within_sector, sector - within_sector);
     \\    }
     \\
-    \\    // The twist and the ring shift shear the folded angle, so the lanes wind
-    \\    // outward.
-    \\    angle += depth_radius * u.ring_count * u.twist + depth * u.ring_shift;
+    \\    // The ring shift shears the folded angle, so the lanes wind outward.
+    \\    angle += depth * u.ring_shift;
     \\
     \\    float lane_band = fmod(band + level * u.lane_offset, 1.0);
     \\    if (lane_band < 0.0) lane_band += 1.0;
@@ -297,7 +294,6 @@ pub const Painter = struct {
             .turn_phase = lens.turn_phase,
             .spin_rate = lens.spin_rate,
             .spin = lens.spin,
-            .twist = lens.twist,
             .ring_shift = lens.ring_shift,
             .lane_offset = lens.lane_offset,
             .calm = lens.calm,

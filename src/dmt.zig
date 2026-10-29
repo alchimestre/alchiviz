@@ -82,10 +82,10 @@ pub const gate_track: Track = .{ .min = 0, .max = 1 };
 
 /// How much of a captured hit reaches the fold, as a multiplier on the capture's
 /// own kick.
-pub const kick_track: Track = .{ .min = 0, .max = 10 };
+pub const kick_track: Track = .{ .min = 0, .max = 6 };
 
 /// How far one kick pushes the rings outward, in ring widths.
-const kick_push: f32 = 0.25;
+const kick_push: f32 = 0.8;
 
 /// Rings the loudness adds on top of the lanes slider.
 const ring_push: f32 = 2.2;
@@ -125,10 +125,6 @@ const lane_offset: f32 = 0.37;
 /// How far each lane's own copy of the frame is turned against the one inside
 /// it.
 const spin: f32 = 0.35;
-
-/// The shear: radians of angle per ring of radius, so each facet spirals as it
-/// runs out from the middle.
-const twist: f32 = 0.55;
 
 /// How far each ring is turned against the next, by depth rather than by ring
 /// index: the index is a step, and a step at a seam shows two different texels
@@ -216,13 +212,6 @@ pub const rings_track: Track = .{ .min = 0.9, .max = 7 };
 
 /// Kaleidoscope facets.
 pub const mirrors_track: Track = .{ .min = 2, .max = 16, .whole = true };
-
-/// What the colour slider means here: the waveform's band colours open up as
-/// it rises, the way the mixer's panel brought its coloured fills up. Nothing
-/// is dimmed, so more colour reads as more colour rather than less light.
-pub fn chromaLevel(colour: f32) f32 {
-    return 1 + 1.2 * std.math.clamp(colour, 0, 1);
-}
 
 /// Vertex every this many physical pixels. Mirror seams are sharp, so the grid
 /// has to be fine.
@@ -312,10 +301,9 @@ pub fn fold(
 
     // Spin turns the whole sampling frame, so the seams and the facets sweep
     // around the middle. It comes before the mirror fold, or the two sides of
-    // every mirror would offset by their own angle. The twist and the ring
-    // shift shear the folded angle, so the lanes wind outward.
+    // every mirror would offset by their own angle. The ring shift shears the
+    // folded angle, so the lanes wind outward.
     const angle = mirrorFold(angle0 + view.turn_phase * view.spin_rate, view.mirrors) +
-        depth_radius * view.ring_count * view.twist +
         depth * view.ring_shift;
 
     // Stagger starts each lane at its own point of the sweep, so neighbouring
@@ -369,7 +357,6 @@ pub const Lens = struct {
     mirrors: f32,
     spin_rate: f32,
     spin: f32,
-    twist: f32,
     ring_shift: f32,
     lane_offset: f32,
     calm: f32,
@@ -390,7 +377,6 @@ pub fn lens(clock: Clock, shape: FoldShape, toggles: stages.Toggles) Lens {
         .mirrors = if (toggles.enabled(.mirrors)) shape.mirrors else 1,
         .spin_rate = if (spinning) spin_rate else 0,
         .spin = spin,
-        .twist = if (toggles.enabled(.twist)) twist else 0,
         .ring_shift = ring_shift,
         .lane_offset = if (toggles.enabled(.stagger)) lane_offset else 0,
         .calm = calm,
@@ -672,7 +658,7 @@ test "a switched-off stage drops out of the lens" {
     const all_on = lens(clock, shape, .{});
 
     var toggles = stages.Toggles{};
-    for ([_]stages.Stage{ .mirrors, .spin, .stagger, .twist, .kick }) |stage| toggles.set(stage, false);
+    for ([_]stages.Stage{ .mirrors, .spin, .stagger, .kick }) |stage| toggles.set(stage, false);
     const plain = lens(clock, shape, toggles);
 
     try std.testing.expectEqual(@as(f32, 1), plain.mirrors);
@@ -815,21 +801,6 @@ test "the wander reaches both ends of its travel" {
     }
     try std.testing.expect(lowest < -0.5);
     try std.testing.expect(highest > 0.5);
-}
-
-test "the colour slider only ever adds colour" {
-    try std.testing.expectApproxEqAbs(@as(f32, 1), chromaLevel(0), 0.0001);
-    try std.testing.expectApproxEqAbs(@as(f32, 2.2), chromaLevel(1), 0.0001);
-    try std.testing.expectApproxEqAbs(@as(f32, 2.2), chromaLevel(9), 0.0001);
-
-    // Monotonic: every step to the right opens the colours further.
-    var previous = chromaLevel(0);
-    var step: f32 = 0.05;
-    while (step <= 1) : (step += 0.05) {
-        const level = chromaLevel(step);
-        try std.testing.expect(level >= previous);
-        previous = level;
-    }
 }
 
 test "the lane and mirror sliders change where the fold samples" {
