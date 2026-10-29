@@ -133,8 +133,7 @@ const fragment_source =
     \\    float eased = within * within * (3.0 - 2.0 * within);
     \\    float parity = fmod(level, 2.0);
     \\    if (parity < 0.0) parity += 2.0;
-    \\    // Branches (3) keeps every ring pointing the same way.
-    \\    float band = u.fold_kind > 2.5 ? eased : (parity < 1.0 ? eased : 1.0 - eased);
+    \\    float band = u.fold_kind > 1.5 ? eased : (parity < 1.0 ? eased : 1.0 - eased);
     \\
     \\    // Spin first, then the mirror fold, or the two sides of every mirror
     \\    // offset by their own angle. One facet is no fold at all.
@@ -300,7 +299,6 @@ pub const Painter = struct {
             .fold_kind = switch (lens.fold) {
                 .tunnel => 1,
                 .rings => 2,
-                .branches => 3,
             },
             .pad = 0,
         };

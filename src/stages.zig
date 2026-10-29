@@ -25,9 +25,7 @@ pub const Stage = enum {
                 "wrapped at the frame's border instead of smearing. The dropdown beside the tick " ++
                 "picks the radial law: tunnel takes the log radius, so rings keep their thickness " ++
                 "and the picture recedes; rings takes the radius straight, so each copy is wider " ++
-                "than the one inside it and the frame expands outward; branches is rings with " ++
-                "every other ring no longer reflected and the facets switched off, so the lanes " ++
-                "run straight out from the middle. The window slider sets how " ++
+                "than the one inside it and the frame expands outward. The window slider sets how " ++
                 "many rings fit and wander breathes that window. Off, the capture is drawn flat " ++
                 "at full size with the panels over it.",
             .mirrors =>
