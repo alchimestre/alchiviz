@@ -154,11 +154,16 @@ pub const App = struct {
         if (self.system_tap) |*running| running.stop(self.allocator);
         self.system_tap = null;
         if (self.ring) |*ring| ring.deinit(self.allocator);
+        self.ring = null;
         self.fold_cache.deinit();
         if (self.wave_target) |target| target.destroyLater();
+        self.wave_target = null;
         if (self.error_text.len > 0) self.allocator.free(self.error_text);
+        self.error_text = &.{};
         self.allocator.free(self.names);
+        self.names = &.{};
         audio.free(self.allocator, self.devices);
+        self.devices = &.{};
     }
 
     /// Open a device and start its history from empty.

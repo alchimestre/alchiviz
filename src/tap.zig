@@ -234,9 +234,12 @@ fn ioProc(
     const queue: *Queue = @ptrCast(@alignCast(client orelse return 0));
     const list = input orelse return 0;
 
+    // `buffers` is declared with room for one entry, but the aggregate can
+    // report more: walk `count` entries through a many-item pointer.
+    const buffers: [*]const AudioBuffer = @ptrCast(&list.buffers);
     var index: u32 = 0;
     while (index < list.count) : (index += 1) {
-        const buffer = list.buffers[index];
+        const buffer = buffers[index];
         const data = buffer.data orelse continue;
         const floats: [*]const f32 = @ptrCast(@alignCast(data));
         queue.push(floats[0 .. buffer.byte_size / @sizeOf(f32)]);

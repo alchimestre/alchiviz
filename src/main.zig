@@ -38,7 +38,6 @@ pub fn main(init: std.process.Init) !void {
 
 fn run(init: std.process.Init, device: ?[]const u8) !void {
     var app = try App.init(init.gpa, init.io, init.environ_map, device);
-    errdefer app.deinit();
 
     if (device) |needle| {
         if (app.devices.len > 0 and audio.find(app.devices, needle) == null) {
@@ -49,14 +48,18 @@ fn run(init: std.process.Init, device: ?[]const u8) !void {
         }
     }
 
-    var backend = try SDLBackend.initWindow(.{
+    // The only fallible step before the app's own defer is registered.
+    var backend = SDLBackend.initWindow(.{
         .io = init.io,
         .allocator = init.gpa,
         .size = .{ .w = 1280, .h = 800 },
         .min_size = .{ .w = 640, .h = 400 },
         .vsync = true,
         .title = "alchiviz",
-    });
+    }) catch |err| {
+        app.deinit();
+        return err;
+    };
     defer backend.deinit();
 
     var painter: ?gpu.Painter = gpu.Painter.init(&backend) catch |err| blk: {

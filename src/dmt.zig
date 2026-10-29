@@ -462,6 +462,9 @@ pub const Cache = struct {
             return self.values;
         }
         if (self.values.len > 0) std.heap.page_allocator.free(self.values);
+        // Cleared before the rebuild: a failed allocation must not leave a
+        // freed pointer with a non-zero len, or the next frame frees it again.
+        self.* = .{};
 
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
