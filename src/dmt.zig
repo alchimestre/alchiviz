@@ -304,9 +304,8 @@ pub fn fold(
     const angle = mirrorFold(angle0 + view.turn_phase * view.spin_rate, view.mirrors) +
         depth * view.ring_shift;
 
-    // Stagger starts each lane at its own point of the sweep, so neighbouring
-    // lanes never show the same picture.
-    const lane_band = @mod(band + level * view.lane_offset, 1);
+    // Modulo would send the full-reach seam back to the source centre.
+    const lane_band = if (view.continuous) band else @mod(band + level * view.lane_offset, 1);
 
     // The sweep: from the middle of the frame out to its edge and back, which
     // is what reads as expansion.
@@ -316,8 +315,6 @@ pub fn fold(
         .y = @abs(@sin(angle)) * reach,
     };
 
-    // Each lane turns its own copy of the frame, so the rings stand against
-    // each other instead of lining up.
     const turned = level * view.spin;
     const source = dvui.Point.Physical{
         .x = wrap(centre.x + local.x * @cos(turned) - local.y * @sin(turned), size.w),
@@ -359,6 +356,7 @@ pub const Lens = struct {
     lane_offset: f32,
     calm: f32,
     fold: Fold,
+    continuous: bool,
 };
 
 /// The lens with the stages that are switched off flattened out: no spin, no
@@ -374,11 +372,12 @@ pub fn lens(clock: Clock, shape: FoldShape, toggles: stages.Toggles) Lens {
         .kick_push = if (pushing) kick_push * shape.pump else 0,
         .mirrors = if (toggles.enabled(.mirrors)) shape.mirrors else 1,
         .spin_rate = if (spinning) spin_rate else 0,
-        .spin = spin,
+        .spin = if (toggles.continuous) 0 else spin,
         .ring_shift = ring_shift,
-        .lane_offset = if (toggles.enabled(.stagger)) lane_offset else 0,
+        .lane_offset = if (toggles.available(.stagger) and toggles.stagger) lane_offset else 0,
         .calm = calm,
         .fold = shape.fold,
+        .continuous = toggles.continuous,
     };
 }
 
@@ -852,4 +851,32 @@ test "the rings fold expands outward where the tunnel recedes" {
     try std.testing.expectApproxEqAbs(@as(f32, 2), depthRadius(.rings, 2 * half, half), 0.0001);
     try std.testing.expectApproxEqAbs(@as(f32, 1), depthRadius(.rings, half, half), 0.0001);
     try std.testing.expect(depthRadius(.tunnel, 2 * half, half) < depthRadius(.tunnel, half, half) + 0.7);
+}
+
+test "continuous sampling joins odd and even lane seams including the endpoint" {
+    const size = dvui.Size.Physical{ .w = 1024, .h = 1024 };
+    const point = dvui.Point.Physical{ .x = 1024, .y = 512 };
+    const shape = FoldShape{ .ring_count = 2.2, .mirrors = 4 };
+    for ([_]Fold{ .tunnel, .rings }) |kind| {
+        var selected = shape;
+        selected.fold = kind;
+        const radial_depth = depthRadius(kind, 512, 512) * shape.ring_count;
+        for ([_]f32{ -2, -1, 0, 1 }) |seam| {
+            var view = lens(.{}, selected, .{ .continuous = true });
+            view.rush_phase = radial_depth - seam;
+            const exact = fold(point, view, size, size, &.{});
+            view.rush_phase -= 0.00001;
+            const before = fold(point, view, size, size, &.{});
+            view.rush_phase += 0.00002;
+            const after = fold(point, view, size, size, &.{});
+            try std.testing.expectApproxEqAbs(exact.x, before.x, 0.01);
+            try std.testing.expectApproxEqAbs(exact.y, before.y, 0.01);
+            try std.testing.expectApproxEqAbs(exact.x, after.x, 0.01);
+            try std.testing.expectApproxEqAbs(exact.y, after.y, 0.01);
+            if (@mod(seam, 2) == 1) {
+                const reach = @sqrt((exact.x - 512) * (exact.x - 512) + (exact.y - 512) * (exact.y - 512));
+                try std.testing.expectApproxEqAbs(@as(f32, 512), reach, 0.01);
+            }
+        }
+    }
 }

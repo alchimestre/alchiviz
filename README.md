@@ -58,17 +58,29 @@ Input is compressed and lifted before it reaches the picture, so a quiet microph
 
 ### Stages
 
-The right panel is the fold, one toggle per stage, in the order a screen point goes through it. The blurb along the bottom describes the stage under the mouse: what it does, what it changes when off, and which slider moves it. Switching a stage off leaves the rest running, so the picture shows what it contributed.
+Use `continuous` in the right panel to compare connected lane sampling with the staggered mapping. It starts off. The bottom blurb describes the control under the mouse.
 
 | stage | what it does | off |
 |---|---|---|
 | `fold` | maps the window back into the frame; the dropdown picks the radial law | the capture, flat |
+| `continuous` | samples connected bands without stagger or per-lane rotation; reflects alternate bands in either radial law | staggered lane mapping |
 | `spin` | turns the sampling frame with the clock | fixed frame |
 | `mirrors` | kaleidoscope facets, count from the `mirror` slider | one unfolded sample |
 | `stagger` | starts each lane at its own point of the sweep | every lane shows the same band |
 | `kick` | everything the beat does: pushes the rings out, adds lanes, widens the window, hurries the clock | the fold stops moving with the music |
 
 The `fold` row also has a dropdown for the radial law. `tunnel` takes the log radius, so rings keep their screen thickness and the picture recedes. `rings` takes the radius straight, so each copy is wider than the one inside it and the frame expands outward from the middle. The tick beside the dropdown switches the whole fold off.
+
+Unavailable controls are grey and cannot be changed. Their values are kept when switching modes.
+
+| condition | unavailable controls |
+|---|---|
+| `continuous` on | `stagger` |
+| `mirrors` off | `mirror` slider |
+| `kick` off | `kick` slider |
+| `fold` off | radial-law dropdown, `continuous`, `spin`, `mirrors`, `stagger`, `wander`, `window`, `lanes`, `mirror`, `kick` slider |
+
+`speed` and the `kick` stage remain active with `fold` off: the clock also animates the source.
 
 ## Rendering
 

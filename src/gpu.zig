@@ -42,7 +42,7 @@ pub const Uniforms = extern struct {
     lane_offset: f32,
     calm: f32,
     fold_kind: f32,
-    pad: f32,
+    continuous: f32,
 };
 
 const vertex_source =
@@ -87,7 +87,7 @@ const fragment_source =
     \\    float lane_offset;
     \\    float calm;
     \\    float fold_kind;
-    \\    float pad;
+    \\    float continuous;
     \\};
     \\
     \\struct VertexOut {
@@ -133,7 +133,8 @@ const fragment_source =
     \\    float eased = within * within * (3.0 - 2.0 * within);
     \\    float parity = fmod(level, 2.0);
     \\    if (parity < 0.0) parity += 2.0;
-    \\    float band = u.fold_kind > 1.5 ? eased : (parity < 1.0 ? eased : 1.0 - eased);
+    \\    float band = u.fold_kind > 1.5 && u.continuous < 0.5
+    \\        ? eased : (parity < 1.0 ? eased : 1.0 - eased);
     \\
     \\    // Spin first, then the mirror fold, or the two sides of every mirror
     \\    // offset by their own angle. One facet is no fold at all.
@@ -149,8 +150,11 @@ const fragment_source =
     \\    // The ring shift shears the folded angle, so the lanes wind outward.
     \\    angle += depth * u.ring_shift;
     \\
-    \\    float lane_band = fmod(band + level * u.lane_offset, 1.0);
-    \\    if (lane_band < 0.0) lane_band += 1.0;
+    \\    float lane_band = band;
+    \\    if (u.continuous < 0.5) {
+    \\        lane_band = fmod(band + level * u.lane_offset, 1.0);
+    \\        if (lane_band < 0.0) lane_band += 1.0;
+    \\    }
     \\    float reach = half_min * lane_band;
     \\    float2 local = float2(abs(cos(angle)) * reach, abs(sin(angle)) * reach);
     \\
@@ -300,7 +304,7 @@ pub const Painter = struct {
                 .tunnel => 1,
                 .rings => 2,
             },
-            .pad = 0,
+            .continuous = if (lens.continuous) 1 else 0,
         };
     }
 };

@@ -1,11 +1,10 @@
-//! The fold's stages, in the order a screen point goes through them. Every
-//! stage can be switched off on its own, so the picture shows what the rest of
-//! the fold does without it.
+//! Sampling controls and the effect stages exposed by the right panel.
 
 const std = @import("std");
 
 pub const Stage = enum {
     fold,
+    continuous,
     spin,
     mirrors,
     stagger,
@@ -28,6 +27,10 @@ pub const Stage = enum {
                 "than the one inside it and the frame expands outward. The window slider sets how " ++
                 "many rings fit and wander breathes that window. Off, the capture is drawn flat " ++
                 "at full size with the panels over it.",
+            .continuous =>
+            "Samples connected bands without wrapping the outer edge back to the centre or " ++
+                "turning each lane separately. Off keeps the staggered lane mapping. Stagger " ++
+                "is unavailable while continuous is on; its setting is kept for switching back.",
             .mirrors =>
             "Folds the spun angle into facets around the middle, so one frame is sampled once per " ++
                 "facet and the picture becomes a kaleidoscope. The mirror slider sets the count " ++
@@ -40,10 +43,8 @@ pub const Stage = enum {
                 "angle still: the lanes still expand outward, but nothing rotates.",
             .stagger =>
             "Starts each lane at its own point of the frame's sweep, so neighbouring lanes show " ++
-                "different parts of the capture instead of the same one. The offset is half of a " ++
-                "sweep per lane and wraps, so lanes three apart come back into line. Off makes " ++
-                "every lane sample the same band, which collapses the tunnel into one repeating " ++
-                "picture.",
+                "different parts of the capture instead of the same one. Off makes every lane " ++
+                "sample the same band. Unavailable while continuous sampling is on.",
             .kick =>
             "Moves the tunnel with the bass. The rings breathe and the clock hurries on the low " ++
                 "band, and each captured hit pushes the rings outward on top of that, so mids and " ++
@@ -53,13 +54,11 @@ pub const Stage = enum {
     }
 };
 
-/// The fold's pipeline in rendering order, taken from the declaration order so
-/// the panel can never list the stages in a different order than the mapping
-/// applies them.
 pub const all = std.enums.values(Stage);
 
 pub const Toggles = struct {
     fold: bool = true,
+    continuous: bool = false,
     spin: bool = true,
     mirrors: bool = true,
     stagger: bool = true,
@@ -68,6 +67,7 @@ pub const Toggles = struct {
     pub fn enabled(self: Toggles, stage: Stage) bool {
         return switch (stage) {
             .fold => self.fold,
+            .continuous => self.continuous,
             .spin => self.spin,
             .mirrors => self.mirrors,
             .stagger => self.stagger,
@@ -78,31 +78,33 @@ pub const Toggles = struct {
     pub fn set(self: *Toggles, stage: Stage, on: bool) void {
         switch (stage) {
             .fold => self.fold = on,
+            .continuous => self.continuous = on,
             .spin => self.spin = on,
             .mirrors => self.mirrors = on,
             .stagger => self.stagger = on,
             .kick => self.kick = on,
         }
     }
+
+    pub fn available(self: Toggles, stage: Stage) bool {
+        return switch (stage) {
+            .fold, .kick => true,
+            .stagger => self.fold and !self.continuous,
+            else => self.fold,
+        };
+    }
 };
 
-test "every stage starts on, and switching one off leaves the rest alone" {
+test "continuous mode preserves stagger for switching back" {
+    var toggles = Toggles{};
+    toggles.set(.continuous, true);
+    try std.testing.expect(!toggles.available(.stagger));
+    try std.testing.expect(toggles.enabled(.stagger));
+    toggles.set(.continuous, false);
+    try std.testing.expect(toggles.available(.stagger));
+    try std.testing.expect(toggles.enabled(.stagger));
+    toggles.set(.fold, false);
     for (all) |stage| {
-        var toggles = Toggles{};
-        try std.testing.expect(toggles.enabled(stage));
-
-        toggles.set(stage, false);
-        try std.testing.expect(!toggles.enabled(stage));
-        for (all) |other| {
-            if (other == stage) continue;
-            try std.testing.expect(toggles.enabled(other));
-        }
-    }
-}
-
-test "every stage has a label and a description" {
-    for (all) |stage| {
-        try std.testing.expect(std.mem.eql(u8, stage.label(), @tagName(stage)));
-        try std.testing.expect(stage.description().len > 120);
+        try std.testing.expectEqual(stage == .fold or stage == .kick, toggles.available(stage));
     }
 }

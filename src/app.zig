@@ -495,30 +495,46 @@ pub const App = struct {
         });
 
         for (stages.all, 0..) |stage, index| {
-            const extra: u32 = 110 + @as(u32, @intCast(index)) * 2;
-            var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
-                .id_extra = extra,
-                .min_size_content = .{ .w = 150, .h = 20 },
-            });
-            defer row.deinit();
+            self.stageRow(stage, 110 + @as(u32, @intCast(index)) * 2);
+        }
 
+        self.keepFlat(1, pane.data().rectScaleFromParent().r);
+    }
+
+    fn stageRow(self: *App, stage: stages.Stage, id: u32) void {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .id_extra = id,
+            .min_size_content = .{ .w = 150, .h = 20 },
+        });
+        defer row.deinit();
+        if (inside(row.data().rectScaleFromParent().r, dvui.currentWindow().mouse_pt)) {
+            self.blurb_focus = .{ .stage = stage };
+        }
+        if (self.toggles.available(stage)) {
             var on = self.toggles.enabled(stage);
             if (dvui.checkbox(@src(), &on, stage.label(), .{
                 .font = .theme(.body),
                 .color_text = .{ .color = ink },
-                .id_extra = extra + 1,
-            })) {
-                self.toggles.set(stage, !self.toggles.enabled(stage));
-            }
-
-            if (stage == .fold) self.lawPicker(extra + 900);
-
-            if (inside(row.data().rectScaleFromParent().r, dvui.currentWindow().mouse_pt)) {
-                self.blurb_focus = .{ .stage = stage };
-            }
+                .id_extra = id + 1,
+            })) self.toggles.set(stage, on);
+        } else {
+            dvui.label(@src(), "[{s}] {s}", .{
+                if (self.toggles.enabled(stage)) "x" else " ", stage.label(),
+            }, .{
+                .font = .theme(.body),
+                .color_text = .{ .color = muted },
+                .padding = dvui.Rect.all(6),
+                .id_extra = id + 1,
+            });
         }
-
-        self.keepFlat(1, pane.data().rectScaleFromParent().r);
+        if (stage == .fold and self.toggles.fold) self.lawPicker(id + 900);
+        if (stage == .fold and !self.toggles.fold) {
+            dvui.labelNoFmt(@src(), blurbs.lawLabel(self.fold_kind), .{}, .{
+                .color_text = .{ .color = muted },
+                .gravity_y = 0.5,
+                .id_extra = id + 900,
+            });
+        }
     }
 
     /// The fold's radial law, one entry per law, each with its own blurb while
@@ -695,14 +711,25 @@ pub const App = struct {
             self.blurb_focus = .{ .knob = knob };
         }
 
+        const available = knob.available(self.toggles);
         dvui.labelNoFmt(@src(), knob.label(), .{}, .{
             .font = .theme(.body),
-            .color_text = .{ .color = ink },
+            .color_text = .{ .color = if (available) ink else muted },
             .gravity_y = 0.5,
             .min_size_content = .{ .w = 64 },
             .id_extra = id + 1,
         });
 
+        if (!available) {
+            dvui.progress(@src(), .{ .percent = start, .color = muted }, .{
+                .min_size_content = .{ .w = 160, .h = 14 },
+                .max_size_content = .{ .w = 160, .h = 14 },
+                .color_fill = .{ .color = muted },
+                .gravity_y = 0.5,
+                .id_extra = id + 2,
+            });
+            return null;
+        }
         var fraction = start;
         const moved = dvui.slider(@src(), .{ .fraction = &fraction }, .{
             .gravity_y = 0.5,

@@ -21,6 +21,15 @@ pub const Knob = enum {
         return @tagName(self);
     }
 
+    pub fn available(self: Knob, toggles: stages.Toggles) bool {
+        return switch (self) {
+            .wander, .window, .lanes => toggles.fold,
+            .mirror => toggles.fold and toggles.mirrors,
+            .kick => toggles.fold and toggles.kick,
+            else => true,
+        };
+    }
+
     pub fn description(self: Knob) []const u8 {
         return switch (self) {
             .speed =>
