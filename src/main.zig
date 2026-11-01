@@ -3,6 +3,7 @@
 const std = @import("std");
 const dvui = @import("dvui");
 const SDLBackend = @import("sdl-backend");
+const c = SDLBackend.c;
 const gpu = @import("gpu.zig");
 const audio = @import("audio.zig");
 const tap = @import("tap.zig");
@@ -83,8 +84,10 @@ fn run(init: std.process.Init, device: ?[]const u8) !void {
     var interrupted = false;
     while (window_open) {
         const frame_start = win.beginWait(interrupted);
+        // PollEvent can resize the window mid-frame and invalidate target dimensions.
+        c.SDL_PumpEvents();
         try win.begin(frame_start);
-        if (try backend.addAllEvents(&win)) break;
+        if (try queuedEvents(&backend, &win)) break;
 
         app.gpu_frame = .{
             .cmd = backend.cmd,
@@ -101,6 +104,23 @@ fn run(init: std.process.Init, device: ?[]const u8) !void {
         const spent_us = std.math.clamp(@divTrunc(now_ns - frame_start, std.time.ns_per_us), 0, frame_budget_us);
         const wait = @min(win.waitTime(frame_end), frame_budget_us - @as(u32, @intCast(spent_us)));
         interrupted = try backend.waitEventTimeout(wait);
+    }
+}
+
+fn queuedEvents(backend: *SDLBackend, win: *dvui.Window) !bool {
+    var event: c.SDL_Event = undefined;
+    while (true) {
+        const count = c.SDL_PeepEvents(&event, 1, c.SDL_GETEVENT, c.SDL_EVENT_FIRST, c.SDL_EVENT_LAST);
+        if (count < 0) {
+            std.log.err("SDL_PeepEvents failed: {s}", .{c.SDL_GetError()});
+            return error.EventQueue;
+        }
+        if (count == 0) return false;
+        _ = try backend.addEvent(win, event);
+        switch (event.type) {
+            c.SDL_EVENT_WINDOW_CLOSE_REQUESTED, c.SDL_EVENT_QUIT => return true,
+            else => {},
+        }
     }
 }
 
