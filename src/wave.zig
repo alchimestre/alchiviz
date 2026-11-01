@@ -92,17 +92,15 @@ pub fn drawSource(
 fn prepare(arena: std.mem.Allocator, ring: *const signal.Ring, blur: f32, columns: usize, gate: f32) ![]signal.Column {
     const stats = try arena.alloc(signal.Column, columns);
     fill(stats, ring);
-    compress(stats, gate);
     smooth(stats);
     const scratch = try arena.alloc(signal.Column, stats.len);
     soften(stats, scratch, blur);
     normalise(stats);
+    compress(stats, gate);
     return stats;
 }
 
-/// The gate: a column under the threshold is silence, so nothing is drawn for
-/// it. Runs before the smoothing, so the gate closes on the capture and not on
-/// the drawn envelope.
+// Normalising after the gate would amplify the attenuated columns again.
 fn compress(stats: []signal.Column, cutoff: f32) void {
     if (cutoff <= 0) return;
     for (stats) |*stat| {
@@ -400,6 +398,28 @@ test "the gate pulls quiet columns down without cutting them" {
     try std.testing.expectEqual(@as(f32, 0), stats[4].peak);
     compress(&stats, 0);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), stats[3].peak, 0.0001);
+}
+
+test "maximum gate leaves dense input thin after all source processing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var ring = try signal.Ring.init(std.testing.allocator, 48000);
+    defer ring.deinit(std.testing.allocator);
+
+    for ([_]f32{ 0.2, 0.8, 1 }) |level| {
+        ring.reset();
+        for (0..96000) |index| ring.push(if (index % 2 == 0) level else -level);
+        for ([_]f32{ 0, 1 }) |blur| {
+            const open = try prepare(arena.allocator(), &ring, blur, 240, 0);
+            const gated = try prepare(arena.allocator(), &ring, blur, 240, @import("dmt.zig").gate_track.max);
+            for (open, gated) |before, after| {
+                try std.testing.expectApproxEqAbs(@as(f32, 1), before.peak, 0.00001);
+                try std.testing.expect(after.peak > 0);
+                try std.testing.expect(after.peak < before.peak * 0.015);
+                try std.testing.expect(after.body < before.body * 0.015);
+            }
+        }
+    }
 }
 
 test "bars read the span from the right edge inwards" {
