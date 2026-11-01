@@ -88,6 +88,8 @@ Unavailable controls are grey and cannot be changed. Their values are kept when 
 
 Drawing goes through dvui on SDL3's GPU backend (Metal on macOS). The tunnel itself is a fragment shader: one fullscreen triangle drawn into the swapchain before dvui draws the panel over it, so the fold costs the CPU nothing per frame. `src/gpu.zig` holds the shader and the pipeline; it reproduces the same fold the CPU code in `src/dmt.zig` does.
 
+OS events are pumped before each frame starts. Fullscreen and resize transitions cannot change the active frame's render-target dimensions.
+
 If the pipeline cannot be created, the app says so on stderr and falls back to the CPU fold.
 
 ## Keys
