@@ -75,10 +75,9 @@ const calm: f32 = 1.5;
 /// The gate: how hard quiet columns are pulled down, as a down-expander
 /// threshold. Twice the threshold is where attenuation reaches nothing, so the
 /// top of the track attenuates the whole frame.
-pub const gate_track: Track = .{ .min = 0, .max = 1 };
+pub const gate_track: Track = .{ .min = 0, .max = 8 };
 
-/// The ceiling on a captured hit: how much of the capture's own kick reaches the
-/// fold. At the right end the hit passes whole; at the left it is blocked.
+/// The amount of bass-driven motion. Zero leaves the effect clock unmodulated.
 pub const kick_track: Track = .{ .min = 0, .max = 1 };
 
 /// How far one kick pushes the rings outward, in ring widths.
@@ -98,27 +97,41 @@ pub const Beat = struct {
 };
 
 /// The beat's whole grip on the fold. `low` is the smoothed low band, so the
-/// kick stage answers bass and nothing else; `kick` is the captured hit.
-/// Switched off, every term is neutral, so the picture no longer moves with the
-/// music at all.
-pub fn beat(low: f32, kick: f32, pump: f32, enabled: bool) Beat {
+/// kick stage answers bass and nothing else; `kick` is the captured hit, and
+/// `amount` the kick slider that scales both. Switched off, every term is
+/// neutral, so the picture no longer moves with the music at all.
+pub fn beat(low: f32, kick: f32, amount: f32, enabled: bool) Beat {
     if (!enabled) return .{};
     return .{
-        .rings = ring_push * low,
-        .pump = kick * window_pump * pump,
-        .pace = 0.6 + 1.4 * low,
+        .rings = ring_push * low * amount,
+        .pump = kick * window_pump * amount,
+        .pace = 1 + (1.4 * low - 0.4) * amount,
     };
 }
 
+test "zero kick amount removes bass modulation at every level" {
+    for ([_]f32{ 0, 0.25, 0.75, 1 }) |low| {
+        const cut = beat(low, 1, kick_track.value(0), true);
+        const disabled = beat(low, 1, 1, false);
+        try std.testing.expectEqual(disabled, cut);
+    }
+}
+
+test "kick amount attenuates every beat contribution toward neutral" {
+    for ([_]f32{ 0, 0.5, 1 }) |low| {
+        const full = beat(low, 0.8, 1, true);
+        const half = beat(low, 0.8, 0.5, true);
+        try std.testing.expectApproxEqAbs(full.rings / 2, half.rings, 0.0001);
+        try std.testing.expectApproxEqAbs(full.pump / 2, half.pump, 0.0001);
+        try std.testing.expectApproxEqAbs((full.pace - 1) / 2, half.pace - 1, 0.0001);
+    }
+}
+
 /// Rings per e-fold of radius: the default granularity of the tunnel.
-pub const rings_default: f32 = 1.1;
+pub const rings_default: f32 = 1.375;
 
 /// Radians of spin per unit of the clock's turn: the sweep the lanes make.
 const spin_rate: f32 = 3;
-
-/// Where in the frame's sweep each lane starts, as a fraction of one, so no two
-/// neighbouring lanes show the same picture.
-const lane_offset: f32 = 0.37;
 
 /// How far each lane's own copy of the frame is turned against the one inside
 /// it.
@@ -206,10 +219,10 @@ pub fn virtualSize(base: dvui.Size.Physical, scale: f32) dvui.Size.Physical {
 
 /// Lane count: few wide lanes at the bottom of the track, many thin ones at the
 /// top.
-pub const rings_track: Track = .{ .min = 0.45, .max = 3.5 };
+pub const rings_track: Track = .{ .min = 0.5625, .max = 4.375 };
 
 /// Kaleidoscope facets.
-pub const mirrors_track: Track = .{ .min = 2, .max = 32, .whole = true };
+pub const mirrors_track: Track = .{ .min = 1, .max = 32, .whole = true };
 
 /// Vertex every this many physical pixels. Mirror seams are sharp, so the grid
 /// has to be fine.
@@ -297,18 +310,14 @@ pub fn fold(
     const level = @floor(depth);
     const band = foldBand(level, depth - level);
 
-    // Spin turns the whole sampling frame, so the seams and the facets sweep
-    // around the middle. It comes before the mirror fold, or the two sides of
-    // every mirror would offset by their own angle. The ring shift shears the
-    // folded angle, so the lanes wind outward.
-    const angle = mirrorFold(angle0 + view.turn_phase * view.spin_rate, view.mirrors) +
-        depth * view.ring_shift;
-
-    // Modulo would send the full-reach seam back to the source centre.
-    const lane_band = if (view.continuous) band else @mod(band + level * view.lane_offset, 1);
+    const turned_angle = angle0 + view.turn_phase * view.spin_rate + depth * view.ring_shift;
+    const angle = mirrorFold(turned_angle, view.mirrors);
 
     // The sweep: from the middle of the frame out to its edge and back, which
-    // is what reads as expansion.
+    // is what reads as expansion. Continuous mode needs the band unwrapped so
+    // odd and even seams meet at the frame edge; the staggered mapping wraps so
+    // a band that rounds up to 1 stays inside instead of on the edge.
+    const lane_band = if (view.continuous) band else @mod(band, 1);
     const reach = half * lane_band;
     const local = dvui.Point.Physical{
         .x = @abs(@cos(angle)) * reach,
@@ -353,14 +362,13 @@ pub const Lens = struct {
     spin_rate: f32,
     spin: f32,
     ring_shift: f32,
-    lane_offset: f32,
     calm: f32,
     fold: Fold,
     continuous: bool,
 };
 
 /// The lens with the stages that are switched off flattened out: no spin, no
-/// facets, no shear, no lane offset, no beat push.
+/// facets, no shear, no beat push.
 pub fn lens(clock: Clock, shape: FoldShape, toggles: stages.Toggles) Lens {
     const spinning = toggles.enabled(.spin);
     const pushing = toggles.enabled(.kick);
@@ -374,7 +382,6 @@ pub fn lens(clock: Clock, shape: FoldShape, toggles: stages.Toggles) Lens {
         .spin_rate = if (spinning) spin_rate else 0,
         .spin = if (toggles.continuous) 0 else spin,
         .ring_shift = ring_shift,
-        .lane_offset = if (toggles.available(.stagger) and toggles.stagger) lane_offset else 0,
         .calm = calm,
         .fold = shape.fold,
         .continuous = toggles.continuous,
@@ -655,7 +662,7 @@ test "a switched-off stage drops out of the lens" {
     const all_on = lens(clock, shape, .{});
 
     var toggles = stages.Toggles{};
-    for ([_]stages.Stage{ .mirrors, .spin, .stagger, .kick }) |stage| toggles.set(stage, false);
+    for ([_]stages.Stage{ .mirrors, .spin, .kick }) |stage| toggles.set(stage, false);
     const plain = lens(clock, shape, toggles);
 
     try std.testing.expectEqual(@as(f32, 1), plain.mirrors);
@@ -708,16 +715,21 @@ test "the facets mirror across their edges" {
     const sector: f32 = @as(f32, std.math.tau) / 4;
     const angle: f32 = 0.3;
 
-    const view = lens(.{}, .{ .mirrors = 4 }, .{});
+    const view = lens(.{ .rush = 0.7, .turn = 0.4 }, .{ .mirrors = 4, .heart = 0.6 }, .{});
+    const depth = depthRadius(view.fold, radius, size.w / 2) * view.ring_count -
+        view.rush_phase - view.heart * view.kick_push;
+    const rotation = view.turn_phase * view.spin_rate + depth * view.ring_shift;
+    const first_angle = angle - rotation;
+    const reflected_angle = sector - angle - rotation;
     const first = fold(
-        .{ .x = centre.x + @cos(angle) * radius, .y = centre.y + @sin(angle) * radius },
+        .{ .x = centre.x + @cos(first_angle) * radius, .y = centre.y + @sin(first_angle) * radius },
         view,
         size,
         size,
         &.{},
     );
     const mirrored = fold(
-        .{ .x = centre.x + @cos(sector - angle) * radius, .y = centre.y + @sin(sector - angle) * radius },
+        .{ .x = centre.x + @cos(reflected_angle) * radius, .y = centre.y + @sin(reflected_angle) * radius },
         view,
         size,
         size,
@@ -766,6 +778,26 @@ test "the mirror track lands on whole facets inside the range" {
         try std.testing.expectEqual(facets, @round(facets));
         try std.testing.expect(facets >= mirrors_track.min and facets <= mirrors_track.max);
         try std.testing.expectApproxEqAbs(position, mirrors_track.fraction(facets), 0.08);
+    }
+}
+
+test "the mirror slider minimum bypasses kaleidoscope folding" {
+    const size = dvui.Size.Physical{ .w = 400, .h = 400 };
+    const clock = Clock{ .rush = 0.7, .turn = 0.4 };
+    const shape = FoldShape{ .mirrors = mirrors_track.value(0) };
+    for ([_]bool{ false, true }) |continuous| {
+        const minimum = lens(clock, shape, .{ .continuous = continuous });
+        const disabled = lens(clock, shape, .{ .continuous = continuous, .mirrors = false });
+        for ([_]dvui.Point.Physical{
+            .{ .x = 100, .y = 80 },
+            .{ .x = 350, .y = 240 },
+            .{ .x = 270, .y = 360 },
+        }) |point| {
+            const actual = fold(point, minimum, size, size, &.{});
+            const expected = fold(point, disabled, size, size, &.{});
+            try std.testing.expectApproxEqAbs(expected.x, actual.x, 0.001);
+            try std.testing.expectApproxEqAbs(expected.y, actual.y, 0.001);
+        }
     }
 }
 
@@ -827,7 +859,6 @@ test "the lane and mirror sliders change where the fold samples" {
     }
 }
 
-
 test "the beat leaves the fold steady when the kick stage is off" {
     const off = beat(1, 1, 1, false);
     try std.testing.expectEqual(@as(f32, 0), off.rings);
@@ -879,4 +910,38 @@ test "continuous sampling joins odd and even lane seams including the endpoint" 
             }
         }
     }
+}
+
+test "continuous mode controls endpoint wrapping and per-lane rotation" {
+    const extent: f32 = 100;
+    const half = extent / 2;
+    const centre = half;
+    const ring_count: f32 = 2;
+    const endpoint_depth: f32 = 1;
+    const lane_depth: f32 = 1.5;
+    const radius_tolerance: f32 = 0.01;
+    const minimum_lane_shift: f32 = 1;
+    const size = dvui.Size.Physical{ .w = extent, .h = extent };
+    const shape = FoldShape{ .ring_count = ring_count, .mirrors = 1, .fold = .rings };
+    const endpoint_radius = endpoint_depth * half / ring_count;
+    const endpoint = dvui.Point.Physical{ .x = centre + endpoint_radius, .y = centre };
+    const wrapped_endpoint = fold(endpoint, lens(.{}, shape, .{}), size, size, &.{});
+    const connected_endpoint = fold(endpoint, lens(.{}, shape, .{ .continuous = true }), size, size, &.{});
+    const wrapped_x = wrapped_endpoint.x - centre;
+    const wrapped_y = wrapped_endpoint.y - centre;
+    const connected_x = connected_endpoint.x - centre;
+    const connected_y = connected_endpoint.y - centre;
+    const wrapped_radius = @sqrt(wrapped_x * wrapped_x + wrapped_y * wrapped_y);
+    const connected_radius = @sqrt(connected_x * connected_x + connected_y * connected_y);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), wrapped_radius, radius_tolerance);
+    try std.testing.expectApproxEqAbs(half, connected_radius, radius_tolerance);
+
+    const lane_radius = lane_depth * half / ring_count;
+    const lane = dvui.Point.Physical{ .x = centre + lane_radius, .y = centre };
+    const rotated = fold(lane, lens(.{}, shape, .{}), size, size, &.{});
+    const unrotated = fold(lane, lens(.{}, shape, .{ .continuous = true }), size, size, &.{});
+    const rotation_x = rotated.x - unrotated.x;
+    const rotation_y = rotated.y - unrotated.y;
+    const rotation_distance = @sqrt(rotation_x * rotation_x + rotation_y * rotation_y);
+    try std.testing.expect(rotation_distance > minimum_lane_shift);
 }

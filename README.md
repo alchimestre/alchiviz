@@ -29,10 +29,10 @@ ramp indexed by loudness, depth and column, so the frame spans the whole ramp.
 
 That frame is then folded into lanes: the radius picks the lane, alternate lanes
 are reflected so the picture mirrors outward, and each lane starts its sweep at a
-different point of the frame. The clock turns the whole sampling
-frame at `spin_rate` times its own turn, so the lanes and their seams sweep
-around the middle, and the angle folds into kaleidoscope facets, which is where
-the mirrors show. The panel is masked out of the fold and painted back sharp.
+different point of the frame. The clock spins the sampling frame, and radial
+shear twists it with depth. The mirror fold acts on that spun and sheared angle
+to produce kaleidoscope facets. The panel is masked out of the fold and painted
+back sharp.
 
 ## Loudness
 
@@ -45,28 +45,27 @@ Input is compressed and lifted before it reaches the picture, so a quiet microph
 | `speed` | the effect clock's step, so lanes expand and turn faster or slower together |
 | `wander` | how far the virtual window breathes, which changes how many lanes fit on screen |
 | `window` | the virtual window's own scale, from the real window at the left to six times it at the right |
-| `lanes` | lanes per e-fold of radius |
+| `lanes` | lanes per e-fold of radius, from 0.5625 to 4.375; default 1.375 |
 | `colour` | slides the whole heat ramp around the colour wheel |
 | `blur` | the soften pass over the columns |
-| `mirror` | kaleidoscope facets, two to thirty-two |
+| `mirror` | kaleidoscope facets, one to thirty-two; minimum bypasses kaleidoscope mirroring |
 | `gate` | how hard quiet columns are pulled down |
-| `kick` | how hard a captured hit throws the tunnel, from still at the left to full punch at the right |
+| `kick` | how much beat motion reaches the fold, from none at the left to full punch at the right |
 
 ### Gate
 
-`gate` is a downward expander, not a switch. It ramps each column's gain from zero at silence to one at twice the slider's value, from `0` (off) to `1`, where the whole frame is attenuated. A column at the threshold keeps half its level, one at twice the threshold keeps all of it, and the curve between is smooth, so quiet passages fade into the tunnel instead of blinking out. Applied to the columns before the envelope is smoothed.
+`gate` is a downward expander, not a switch. It ramps each column's gain from zero at silence to one at twice the slider's value, from `0` (off) to `8`. A column at the threshold keeps half its level, one at twice the threshold keeps all of it, and the curve between is smooth, so quiet passages fade into the tunnel instead of blinking out. Applied after smoothing, blur and level normalisation. At maximum, even the tallest columns retain only about 1.1% of their ungated height.
 
 ### Stages
 
-Use `continuous` in the right panel to compare connected lane sampling with the staggered mapping. It starts off. The bottom blurb describes the control under the mouse.
+Use `continuous` in the right panel to compare connected bands with endpoint wrapping and per-lane rotation. It starts off. The bottom blurb describes the hovered control.
 
 | stage | what it does | off |
 |---|---|---|
 | `fold` | maps the window back into the frame; the dropdown picks the radial law | the capture, flat |
-| `continuous` | samples connected bands without stagger or per-lane rotation; reflects alternate bands in either radial law | staggered lane mapping |
+| `continuous` | samples connected bands without wrapping the outer edge back to the centre or turning each lane separately; reflects alternate bands in either radial law | wraps the full-reach endpoint to the centre and rotates each lane |
 | `spin` | turns the sampling frame with the clock | fixed frame |
 | `mirrors` | kaleidoscope facets, count from the `mirror` slider | one unfolded sample |
-| `stagger` | starts each lane at its own point of the sweep | every lane shows the same band |
 | `kick` | everything the beat does: pushes the rings out, adds lanes, widens the window, hurries the clock | the fold stops moving with the music |
 
 The `fold` row also has a dropdown for the radial law. `tunnel` takes the log radius, so rings keep their screen thickness and the picture recedes. `rings` takes the radius straight, so each copy is wider than the one inside it and the frame expands outward from the middle. The tick beside the dropdown switches the whole fold off.
@@ -75,10 +74,9 @@ Unavailable controls are grey and cannot be changed. Their values are kept when 
 
 | condition | unavailable controls |
 |---|---|
-| `continuous` on | `stagger` |
 | `mirrors` off | `mirror` slider |
 | `kick` off | `kick` slider |
-| `fold` off | radial-law dropdown, `continuous`, `spin`, `mirrors`, `stagger`, `wander`, `window`, `lanes`, `mirror`, `kick` slider |
+| `fold` off | radial-law dropdown, `continuous`, `spin`, `mirrors`, `wander`, `window`, `lanes`, `mirror`, `kick` slider |
 
 `speed` and the `kick` stage remain active with `fold` off: the clock also animates the source.
 

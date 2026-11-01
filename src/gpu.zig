@@ -39,10 +39,11 @@ pub const Uniforms = extern struct {
     spin_rate: f32,
     spin: f32,
     ring_shift: f32,
-    lane_offset: f32,
     calm: f32,
     fold_kind: f32,
     continuous: f32,
+    // Keep Zig's buffer size in sync with Metal's 8-byte struct alignment.
+    abi_padding: f32,
 };
 
 const vertex_source =
@@ -84,10 +85,10 @@ const fragment_source =
     \\    float spin_rate;
     \\    float spin;
     \\    float ring_shift;
-    \\    float lane_offset;
     \\    float calm;
     \\    float fold_kind;
     \\    float continuous;
+    \\    float abi_padding;
     \\};
     \\
     \\struct VertexOut {
@@ -136,9 +137,7 @@ const fragment_source =
     \\    float band = u.fold_kind > 1.5 && u.continuous < 0.5
     \\        ? eased : (parity < 1.0 ? eased : 1.0 - eased);
     \\
-    \\    // Spin first, then the mirror fold, or the two sides of every mirror
-    \\    // offset by their own angle. One facet is no fold at all.
-    \\    float turned_angle = angle0 + u.turn_phase * u.spin_rate;
+    \\    float turned_angle = angle0 + u.turn_phase * u.spin_rate + depth * u.ring_shift;
     \\    float angle = turned_angle;
     \\    if (u.mirrors > 1.0) {
     \\        float sector = 6.28318530718 / u.mirrors;
@@ -147,12 +146,9 @@ const fragment_source =
     \\        angle = min(within_sector, sector - within_sector);
     \\    }
     \\
-    \\    // The ring shift shears the folded angle, so the lanes wind outward.
-    \\    angle += depth * u.ring_shift;
-    \\
     \\    float lane_band = band;
     \\    if (u.continuous < 0.5) {
-    \\        lane_band = fmod(band + level * u.lane_offset, 1.0);
+    \\        lane_band = fmod(band, 1.0);
     \\        if (lane_band < 0.0) lane_band += 1.0;
     \\    }
     \\    float reach = half_min * lane_band;
@@ -298,13 +294,13 @@ pub const Painter = struct {
             .spin_rate = lens.spin_rate,
             .spin = lens.spin,
             .ring_shift = lens.ring_shift,
-            .lane_offset = lens.lane_offset,
             .calm = lens.calm,
             .fold_kind = switch (lens.fold) {
                 .tunnel => 1,
                 .rings => 2,
             },
             .continuous = if (lens.continuous) 1 else 0,
+            .abi_padding = 0,
         };
     }
 };
