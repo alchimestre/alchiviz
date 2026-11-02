@@ -4,6 +4,7 @@ test {
     _ = @import("signal.zig");
     _ = @import("wave.zig");
     _ = @import("dmt.zig");
+    _ = @import("wander.zig");
     _ = @import("geom.zig");
     _ = @import("stages.zig");
     _ = @import("blurbs.zig");

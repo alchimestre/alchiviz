@@ -12,10 +12,14 @@ const gpu = @import("gpu.zig");
 const wave = @import("wave.zig");
 const stages = @import("stages.zig");
 const blurbs = @import("blurbs.zig");
+const wander = @import("wander.zig");
 
 const panel = dvui.Color{ .r = 0x14, .g = 0x14, .b = 0x1f, .a = 0xff };
 const ink = dvui.Color{ .r = 0xf8, .g = 0xf8, .b = 0xf2, .a = 0xff };
 const muted = dvui.Color{ .r = 0x8a, .g = 0x8a, .b = 0x9e, .a = 0xff };
+/// The wander tick and live-value columns, fixed so every row aligns.
+const toggle_width: f32 = 24;
+const value_width: f32 = 38;
 
 fn maybeStills(hidden: bool, stills: []const dvui.Rect.Physical) []const dvui.Rect.Physical {
     return if (hidden) &.{} else stills;
@@ -86,17 +90,10 @@ pub const App = struct {
     last_sample_ns: i96 = 0,
     levels: signal.Levels = .{},
 
-    /// The DMT panel: the same seven values the mixer's DMT mode exposed.
-    effect_speed: f32 = 1,
-    window_wander_limit: f32 = 0.45,
-    virtual_scale: f32 = 1,
+    sliders: wander.Values = .{},
+    animated: wander.Values = .{},
+    wandering: wander.State = .{},
     virtual_base: ?dvui.Size.Physical = null,
-    lane_rings: f32 = dmt.rings_default,
-    lane_mirrors: f32 = 4,
-    kick_pump: f32 = 1,
-    lane_colour: f32 = 0,
-    blur: f32 = 0,
-    gate: f32 = 0,
     /// Which pipeline stages are switched on. Every stage has a toggle in the
     /// right panel; the blurb under the window describes the one hovered.
     toggles: stages.Toggles = .{},
@@ -277,18 +274,16 @@ pub const App = struct {
         const levels = self.levels;
         // Everything the beat does to the fold hangs off the kick stage, so
         // switching kick off leaves the picture steady against the music.
-        const beat = dmt.beat(levels.low_level, levels.kick, self.kick_pump, self.toggles.kick);
-        // The fold is laid out on the window it opened in, scaled by the window
-        // slider and breathing with the wander and the kick.
-        const swell = @max(0.2, 1 + dmt.wander(self.elapsed, self.window_wander_limit) + beat.pump);
-        const canvas = dmt.virtualSize(self.windowBase(size), self.virtual_scale * swell);
+        const beat = dmt.beat(levels.low_level, levels.kick, self.animated.kick, self.toggles.kick);
+        const swell = @max(0.2, 1 + beat.pump);
+        const canvas = dmt.virtualSize(self.windowBase(size), self.animated.window * swell);
         // The fold samples the frame where the screen point lands, so no axis
         // swap.
         const view = dmt.lens(self.clock, .{
-            .ring_count = std.math.clamp(self.lane_rings + beat.rings, dmt.rings_track.min, dmt.rings_track.max),
+            .ring_count = std.math.clamp(self.animated.lanes + beat.rings, dmt.rings_track.min, dmt.rings_track.max),
             .heart = self.levels.kick,
-            .pump = self.kick_pump,
-            .mirrors = self.lane_mirrors,
+            .pump = self.animated.kick,
+            .mirrors = self.animated.mirror,
             .fold = self.fold_kind,
         }, self.toggles);
         if (gpu_fold) {
@@ -445,33 +440,19 @@ pub const App = struct {
                 .id_extra = 991,
             });
         }
-        if (self.sliderRow(.speed, dmt.speed_track.fraction(self.effect_speed), 10)) |fraction| {
-            self.effect_speed = dmt.speed_track.value(fraction);
+        if (self.sliderRow(.wander, self.wandering.intensity, 10)) |fraction| {
+            self.wandering.intensity = fraction;
         }
-        if (self.sliderRow(.wander, dmt.wander_track.fraction(self.window_wander_limit), 20)) |fraction| {
-            self.window_wander_limit = dmt.wander_track.value(fraction);
+        self.parameterRow(.speed, 20);
+        self.parameterRow(.window, 30);
+        self.parameterRow(.lanes, 40);
+        if (self.colourBar(self.sliders.colour, 50)) |fraction| {
+            self.sliders.colour = fraction;
         }
-        if (self.sliderRow(.window, dmt.window_track.fraction(self.virtual_scale), 30)) |fraction| {
-            self.virtual_scale = dmt.window_track.value(fraction);
-        }
-        if (self.sliderRow(.lanes, dmt.rings_track.fraction(self.lane_rings), 40)) |fraction| {
-            self.lane_rings = dmt.rings_track.value(fraction);
-        }
-        if (self.colourBar(self.lane_colour, 50)) |fraction| {
-            self.lane_colour = fraction;
-        }
-        if (self.sliderRow(.blur, self.blur, 60)) |fraction| {
-            self.blur = fraction;
-        }
-        if (self.sliderRow(.mirror, dmt.mirrors_track.fraction(self.lane_mirrors), 70)) |fraction| {
-            self.lane_mirrors = dmt.mirrors_track.value(fraction);
-        }
-        if (self.sliderRow(.gate, dmt.gate_track.fraction(self.gate), 80)) |fraction| {
-            self.gate = dmt.gate_track.value(fraction);
-        }
-        if (self.sliderRow(.kick, dmt.kick_track.fraction(self.kick_pump), 90)) |fraction| {
-            self.kick_pump = dmt.kick_track.value(fraction);
-        }
+        self.parameterRow(.blur, 60);
+        self.parameterRow(.mirror, 70);
+        self.parameterRow(.gate, 80);
+        self.parameterRow(.kick, 90);
 
         self.keepFlat(0, pane.data().rectScaleFromParent().r);
     }
@@ -543,7 +524,7 @@ pub const App = struct {
         var picker: dvui.DropdownWidget = undefined;
         picker.init(@src(), .{
             .label = blurbs.lawLabel(self.fold_kind),
-            .selected_index = @intFromEnum(self.fold_kind),
+            .selected_index = @backingInt(self.fold_kind),
         }, .{
             .font = .theme(.body),
             .color_text = .{ .color = ink },
@@ -555,7 +536,7 @@ pub const App = struct {
 
         if (!picker.dropped()) return;
         inline for (@typeInfo(dmt.Fold).@"enum".field_values) |value| {
-            const law: dmt.Fold = @enumFromInt(value);
+            const law: dmt.Fold = @fromBackingInt(@intCast(value));
             var item = picker.addChoice();
             defer item.deinit();
             dvui.labelNoFmt(@src(), blurbs.lawLabel(law), .{}, item.data().options.strip().override(item.style()));
@@ -564,7 +545,7 @@ pub const App = struct {
             if (item.activeRect() != null) {
                 // Branches is the fold without a mirror, so picking it drops
                 // the facets rather than leaving a tick that cannot show.
-                    self.fold_kind = law;
+                self.fold_kind = law;
                 picker.close();
             }
         }
@@ -624,6 +605,7 @@ pub const App = struct {
             .min_size_content = .{ .h = 22 },
         });
         defer row.deinit();
+        defer self.wanderToggle(.colour, true, id + 100);
 
         if (inside(row.data().rectScaleFromParent().r, dvui.currentWindow().mouse_pt)) {
             self.blurb_focus = .{ .knob = .colour };
@@ -642,7 +624,7 @@ pub const App = struct {
             .gravity_y = 0.5,
             .min_size_content = .{ .w = width, .h = height },
             .max_size_content = .{ .w = width, .h = height },
-            .padding = .{},
+            .padding = dvui.Rect.all(2),
             .margin = .{},
         });
         defer bar.deinit();
@@ -673,7 +655,7 @@ pub const App = struct {
 
     /// Press-and-drag over the bar, the way dvui's own slider reads it.
     fn colourDrag(bar: *dvui.BoxWidget, width: f32) ?f32 {
-        const rs = bar.data().rectScale();
+        const rs = bar.data().contentRectScale();
         var moved: ?f32 = null;
         for (dvui.events()) |*e| {
             if (!dvui.eventMatch(e, .{ .id = bar.data().id, .r = rs.r })) continue;
@@ -698,14 +680,75 @@ pub const App = struct {
         return std.math.clamp((x - rs.r.x) / width, 0, 1);
     }
 
+    fn parameterRow(self: *App, comptime parameter: wander.Parameter, id: u32) void {
+        const track = parameter.track();
+        const knob = comptime std.meta.stringToEnum(blurbs.Knob, @tagName(parameter)).?;
+        const base = &@field(self.sliders, @tagName(parameter));
+        if (self.sliderRow(knob, track.fraction(base.*), id)) |fraction| {
+            base.* = track.value(fraction);
+        }
+    }
+
+    fn wanderToggle(self: *App, comptime parameter: wander.Parameter, available: bool, id: u32) void {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = id, .gravity_y = 0.5 });
+        defer row.deinit();
+        if (inside(row.data().rectScaleFromParent().r, dvui.currentWindow().mouse_pt)) {
+            self.blurb_focus = .{ .knob = .wander };
+        }
+
+        var on = self.wandering.enabled.contains(parameter);
+        if (available) {
+            if (dvui.checkbox(@src(), &on, null, .{
+                .gravity_y = 0.5,
+                .padding = dvui.Rect.all(2),
+                .min_size_content = .{ .w = toggle_width },
+                .max_size_content = .width(toggle_width),
+            })) {
+                if (on) self.wandering.enabled.insert(parameter) else self.wandering.enabled.remove(parameter);
+            }
+        } else {
+            dvui.labelNoFmt(@src(), if (on) "[x]" else "[ ]", .{ .align_x = 0.5, .align_y = 0.5 }, .{
+                .font = .theme(.body),
+                .color_text = .{ .color = muted },
+                .gravity_y = 0.5,
+                .min_size_content = .{ .w = toggle_width, .h = 14 },
+                .max_size_content = .{ .w = toggle_width, .h = 14 },
+            });
+        }
+
+        const animated = @field(self.animated, @tagName(parameter));
+        const colour = if (available) ink else muted;
+        if (parameter.track().whole) {
+            dvui.labelEx(@src(), "{d:.0}", .{animated}, .{ .align_x = 1, .align_y = 0.5 }, .{
+                .font = .theme(.body),
+                .color_text = .{ .color = colour },
+                .gravity_y = 0.5,
+                .min_size_content = .{ .w = value_width, .h = 14 },
+                .max_size_content = .{ .w = value_width, .h = 14 },
+            });
+        } else {
+            dvui.labelEx(@src(), "{d:.2}", .{animated}, .{ .align_x = 1, .align_y = 0.5 }, .{
+                .font = .theme(.body),
+                .color_text = .{ .color = colour },
+                .gravity_y = 0.5,
+                .min_size_content = .{ .w = value_width, .h = 14 },
+                .max_size_content = .{ .w = value_width, .h = 14 },
+            });
+        }
+    }
+
     /// A label with a slider beside it. Returns the new position only when the
     /// slider moved.
-    fn sliderRow(self: *App, knob: blurbs.Knob, start: f32, id: u32) ?f32 {
+    fn sliderRow(self: *App, comptime knob: blurbs.Knob, start: f32, id: u32) ?f32 {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .id_extra = id,
             .min_size_content = .{ .h = 22 },
         });
         defer row.deinit();
+        defer if (knob != .wander) {
+            const parameter = comptime std.meta.stringToEnum(wander.Parameter, @tagName(knob)).?;
+            self.wanderToggle(parameter, knob.available(self.toggles), id + 100);
+        };
 
         if (inside(row.data().rectScaleFromParent().r, dvui.currentWindow().mouse_pt)) {
             self.blurb_focus = .{ .knob = knob };
@@ -753,8 +796,9 @@ pub const App = struct {
         self.elapsed += step;
         // The tunnel keeps moving through silence; only its speed follows the
         // capture.
-        const beat = dmt.beat(self.levels.low_level, self.levels.kick, self.kick_pump, self.toggles.kick);
-        self.clock.advance(step * self.effect_speed * beat.pace, dmt.mood(self.elapsed));
+        self.animated = self.wandering.apply(self.sliders, self.elapsed);
+        const beat = dmt.beat(self.levels.low_level, self.levels.kick, self.animated.kick, self.toggles.kick);
+        self.clock.advance(step * self.animated.speed * beat.pace, dmt.mood(self.elapsed));
 
         const ring = if (self.ring) |*value| value else return;
         const before = ring.pushes;
@@ -796,8 +840,8 @@ pub const App = struct {
         defer dvui.clipSet(dvui.currentWindow().rect_pixels);
 
         const ring = if (self.ring) |*value| value else return;
-        try wave.drawSource(arena, size, ring, self.lane_colour, self.blur, .{
-            .gate = self.gate,
+        try wave.drawSource(arena, size, ring, self.animated.colour, self.animated.blur, .{
+            .gate = self.animated.gate,
             .phase = @floatCast(self.clock.turn),
         });
     }

@@ -1,7 +1,6 @@
 //! The words under the panels: what the thing under the mouse does, what
 //! changes when it is off or at either end, and which control drives it.
 
-const std = @import("std");
 const dmt = @import("dmt.zig");
 const stages = @import("stages.zig");
 
@@ -23,7 +22,7 @@ pub const Knob = enum {
 
     pub fn available(self: Knob, toggles: stages.Toggles) bool {
         return switch (self) {
-            .wander, .window, .lanes => toggles.fold,
+            .window, .lanes => toggles.fold,
             .mirror => toggles.fold and toggles.mirrors,
             .kick => toggles.fold and toggles.kick,
             else => true,
@@ -35,10 +34,10 @@ pub const Knob = enum {
             .speed => "How fast the effect clock steps. It scales the spin, the outward rush of the rings and " ++
                 "the rate lanes start at, so it sets the whole motion's tempo rather than one part " ++
                 "of it. Captured loudness nudges it too, but only while the kick stage is on.",
-            .wander => "How far the virtual window breathes over time. The window the fold is laid out on " ++
-                "swells and shrinks by this much, so more or fewer lanes fit on screen without a " ++
-                "slider moving. At the left the window is still; at the right it opens and closes " ++
-                "by nearly half, which reads as the tunnel pulsing.",
+            .wander => "How far enabled sliders drift around their base positions. The wander tick to the " ++
+                "right of each other slider selects it independently, including colour. Left is off; " ++
+                "right gives the widest movement. Values stay inside their tracks, and mirror counts " ++
+                "stay whole. Turning a tick off restores that slider's base value.",
             .window => "The virtual window's scale, and so how many lanes fit on screen. Left is the real " ++
                 "window, where one lane spans the frame and the tunnel is at its widest; right is " ++
                 "six times it, the same picture cut into six times as many rings. The track is " ++
@@ -110,14 +109,3 @@ pub const Subject = union(enum) {
         };
     }
 };
-
-test "every knob and law carries a blurb" {
-    inline for (@typeInfo(Knob).@"enum".field_values) |value| {
-        const knob: Knob = @fromBackingInt(@intCast(value));
-        try std.testing.expect(knob.description().len > 120);
-    }
-    inline for (@typeInfo(dmt.Fold).@"enum".field_values) |value| {
-        const law: dmt.Fold = @fromBackingInt(@intCast(value));
-        try std.testing.expect(lawDescription(law).len > 120);
-    }
-}

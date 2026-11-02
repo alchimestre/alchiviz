@@ -184,12 +184,7 @@ pub const Track = struct {
 /// values, so a slider reads the same amount in either app.
 pub const speed_track: Track = .{ .min = 0.2, .max = 2 };
 
-/// 0 holds the window still; 1.2 is the widest swing.
-pub const wander_track: Track = .{ .min = 0, .max = 1.2 };
-
-/// The wander itself, as a fraction of the window scale to add to it. Goals are
-/// seeded from the time and joined by a smoothstep, so the tunnel breathes
-/// without a random walk to carry between frames.
+/// Smooth, repeatable motion bounded by `limit`.
 pub fn wander(time: f64, limit: f32) f32 {
     const period: f64 = 5.5;
     const steps = time / period;
@@ -741,7 +736,7 @@ test "the facets mirror across their edges" {
 }
 
 test "every slider track round-trips and clamps" {
-    const tracks = [_]Track{ speed_track, wander_track, window_track, rings_track, mirrors_track, gate_track, kick_track };
+    const tracks = [_]Track{ speed_track, window_track, rings_track, mirrors_track, gate_track, kick_track };
 
     for (tracks) |track| {
         for ([_]f32{ 0, 0.25, 0.5, 0.75, 1 }) |position| {
