@@ -75,6 +75,12 @@ pub const Source = struct {
     /// Time in the capture's own clock, so a style that moves stays tied to
     /// the audio rather than to the wall clock.
     phase: f32 = 0,
+    /// Painted in place of the flat background, so the fold repeats a picture
+    /// instead of an empty page.
+    backdrop: ?dvui.Texture = null,
+    /// Copies of the backdrop across the frame; the rest tile from these.
+    /// Constant of the draw, so it has no default: the caller decides.
+    backdrop_tiles: f32,
 };
 
 pub fn drawSource(
@@ -143,7 +149,11 @@ fn terrain(arena: std.mem.Allocator, size: dvui.Size.Physical, ring: *const sign
     const vertexes = try arena.alloc(dvui.Vertex, quads * 4);
     const indices = try arena.alloc(dvui.Vertex.Index, quads * 6);
     var at: Quad = .{ .vertexes = vertexes, .indices = indices, .next = 0 };
-    at.append(.{ .x = 0, .y = 0, .w = size.w, .h = size.h }, background);
+    if (source.backdrop) |texture| {
+        try paintImage(arena, size, texture, source.backdrop_tiles);
+    } else {
+        at.append(.{ .x = 0, .y = 0, .w = size.w, .h = size.h }, background);
+    }
 
     // Far layers first, so the near ones cover them.
     for (0..layers) |layer| {
@@ -173,6 +183,63 @@ fn terrain(arena: std.mem.Allocator, size: dvui.Size.Physical, ring: *const sign
         }
     }
     try flush(at, size);
+}
+
+/// Copies of the image across the whole frame, before the columns are drawn.
+/// The texture wraps, so a uv past one is the next copy.
+fn paintImage(
+    arena: std.mem.Allocator,
+    size: dvui.Size.Physical,
+    texture: dvui.Texture,
+    tiles: f32,
+) !void {
+    const whole = dvui.Rect.Physical{ .x = 0, .y = 0, .w = size.w, .h = size.h };
+    const corners = [_]dvui.Point.Physical{
+        .{ .x = 0, .y = 0 },
+        .{ .x = size.w, .y = 0 },
+        .{ .x = size.w, .y = size.h },
+        .{ .x = 0, .y = size.h },
+    };
+
+    const vertexes = try arena.alloc(dvui.Vertex, corners.len);
+    for (corners, 0..) |corner, at| {
+        vertexes[at] = .{
+            .pos = corner,
+            .col = .{ .r = 255, .g = 255, .b = 255, .a = 255 },
+            .uv = tileUv(corner, size, tiles),
+        };
+    }
+
+    const indices = try arena.alloc(dvui.Vertex.Index, 6);
+    @memcpy(indices, &[_]dvui.Vertex.Index{ 0, 1, 2, 0, 2, 3 });
+
+    try dvui.renderTriangles(.{
+        .vertexes = vertexes,
+        .indices = indices,
+        .bounds = whole,
+    }, texture);
+}
+
+/// Texture coordinate for a frame point: `tiles` copies across the width, and
+/// the same texel size down, so a copy keeps its aspect on a wide window.
+fn tileUv(point: dvui.Point.Physical, size: dvui.Size.Physical, tiles: f32) @Vector(2, f32) {
+    return .{
+        point.x / size.w * tiles,
+        point.y / size.w * tiles,
+    };
+}
+
+test "the frame edge is one full tile cycle per copy" {
+    const size = dvui.Size.Physical{ .w = 800, .h = 400 };
+    const origin = tileUv(.{ .x = 0, .y = 0 }, size, 8);
+    const across = tileUv(.{ .x = 800, .y = 0 }, size, 8);
+    const down = tileUv(.{ .x = 0, .y = 400 }, size, 8);
+
+    try std.testing.expectEqual(@as(f32, 0), origin[0]);
+    try std.testing.expectEqual(@as(f32, 8), across[0]);
+    // Four rows of square cells: 400 points down is half the width, so half
+    // the columns' count.
+    try std.testing.expectEqual(@as(f32, 4), down[1]);
 }
 
 /// Heatmap ramp: cold for quiet, red for loud, with the depth layer sliding

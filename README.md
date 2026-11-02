@@ -111,7 +111,16 @@ Keys are the names dvui uses: `a` to `z`, `zero` to `nine`, `escape`, `space`, `
 |---|---|
 | none | the system output, then a loopback device if one is installed (eqMac, BlackHole, Loopback, Soundflower), then the system default recording device |
 | `--device <text>` | device whose name contains `<text>`, case-insensitive |
+| `--backdrop <file>` | image tiled across the frame under the waveform |
+| `--tiles <n>` | copies of the backdrop across the width (default 8) |
 | `--list-devices` | print recording devices (`*` marks the default choice) and exit |
+
+The backdrop repeats as a grid of square cells, `--tiles` copies across the
+width and as many rows as fit. It is sampled nearest so pixel art stays sharp,
+and it replaces the flat background the waveform draws over. Formats are what
+stb reads: PNG, JPEG, BMP, TGA, GIF, PSD, HDR. A file that will not decode
+prints one line and the frame draws as if the flag were absent.
+
 
 The capture stream is mono float at 48 kHz whatever the device offers.
 

@@ -3,6 +3,8 @@ const std = @import("std");
 test {
     _ = @import("signal.zig");
     _ = @import("wave.zig");
+    _ = @import("image.zig");
+    _ = @import("backdrop.zig");
     _ = @import("dmt.zig");
     _ = @import("wander.zig");
     _ = @import("geom.zig");

@@ -13,6 +13,7 @@ const wave = @import("wave.zig");
 const stages = @import("stages.zig");
 const blurbs = @import("blurbs.zig");
 const wander = @import("wander.zig");
+const backdrop_mod = @import("backdrop.zig");
 
 const panel = dvui.Color{ .r = 0x14, .g = 0x14, .b = 0x1f, .a = 0xff };
 const ink = dvui.Color{ .r = 0xf8, .g = 0xf8, .b = 0xf2, .a = 0xff };
@@ -82,6 +83,11 @@ pub const App = struct {
 
     wave_target: ?dvui.Texture.Target = null,
     frame_target: ?dvui.Texture.Target = null,
+    /// Painted across the frame before the waveform, so the fold repeats a
+    /// picture. Absent unless `--backdrop` loaded.
+    backdrop: backdrop_mod.Backdrop,
+    /// Copies of the backdrop across the frame.
+    backdrop_tiles: f32 = backdrop_mod.default_tiles,
     fold_cache: dmt.Cache = .{},
     clock: dmt.Clock = .{},
     elapsed: f64 = 0,
@@ -118,6 +124,7 @@ pub const App = struct {
         io: std.Io,
         environ: *const std.process.Environ.Map,
         requested: ?[]const u8,
+        backdrop: backdrop_mod.Options,
     ) !App {
         var tap_failure: ?anyerror = null;
         var system_tap = tap.start(io, allocator) catch |err| blk: {
@@ -159,8 +166,19 @@ pub const App = struct {
             .selected = chosen,
             .system_tap = system_tap,
             .tap_failure = tap_failure,
+            .backdrop = backdrop_mod.Backdrop.init(allocator),
+            .backdrop_tiles = backdrop.tiles,
         };
         system_tap = null;
+
+        // A backdrop that will not load leaves the frame as it was, with the
+        // reason on screen and in the log instead of nowhere.
+        if (backdrop.path) |path| {
+            app.backdrop.open(path) catch |err| {
+                std.debug.print("cannot load backdrop {s}: {s}\n", .{ path, @errorName(err) });
+                app.setError(@errorName(err));
+            };
+        }
 
         app.select(chosen);
         if (audio_failed) {
@@ -180,14 +198,24 @@ pub const App = struct {
         if (self.ring) |*ring| ring.deinit(self.allocator);
         self.ring = null;
         self.fold_cache.deinit();
-        if (self.wave_target) |target| target.destroyLater();
-        self.wave_target = null;
+        self.backdrop.deinit();
         if (self.error_text.len > 0) self.allocator.free(self.error_text);
         self.error_text = &.{};
         self.allocator.free(self.names);
         self.names = &.{};
         audio.free(self.allocator, self.devices);
         self.devices = &.{};
+    }
+
+    /// Free the GPU textures. dvui queues a texture for the window that owns
+    /// it, so this only works between `Window.begin` and `Window.end`; call it
+    /// while the window is closing, not after.
+    pub fn release(self: *App) void {
+        self.backdrop.release();
+        if (self.wave_target) |target| target.destroyLater();
+        self.wave_target = null;
+        if (self.frame_target) |target| target.destroyLater();
+        self.frame_target = null;
     }
 
     /// Open a device and start its history from empty.
@@ -843,6 +871,8 @@ pub const App = struct {
         try wave.drawSource(arena, size, ring, self.animated.colour, self.animated.blur, .{
             .gate = self.animated.gate,
             .phase = @floatCast(self.clock.turn),
+            .backdrop = self.backdrop.texture(),
+            .backdrop_tiles = self.backdrop_tiles,
         });
     }
 

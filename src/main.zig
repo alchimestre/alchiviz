@@ -8,6 +8,7 @@ const gpu = @import("gpu.zig");
 const audio = @import("audio.zig");
 const tap = @import("tap.zig");
 const App = @import("app.zig").App;
+const backdrop_mod = @import("backdrop.zig");
 
 /// One frame at 60 Hz, in microseconds.
 const frame_budget_us: u32 = 16_667;
@@ -18,6 +19,8 @@ pub fn main(init: std.process.Init) !void {
     _ = args.next(); // argv[0]
 
     var device: ?[]const u8 = null;
+    var backdrop: ?[]const u8 = null;
+    var tiles: f32 = backdrop_mod.default_tiles;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             usage();
@@ -30,15 +33,25 @@ pub fn main(init: std.process.Init) !void {
             device = args.next() orelse return error.MissingDeviceName;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--backdrop")) {
+            backdrop = args.next() orelse return error.MissingBackdropPath;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--tiles")) {
+            const text = args.next() orelse return error.MissingTileCount;
+            tiles = std.fmt.parseFloat(f32, text) catch return error.BadTileCount;
+            if (!(tiles > 0)) return error.BadTileCount;
+            continue;
+        }
         usage();
         return error.UnknownArgument;
     }
 
-    return run(init, device);
+    return run(init, device, .{ .path = backdrop, .tiles = tiles });
 }
 
-fn run(init: std.process.Init, device: ?[]const u8) !void {
-    var app = try App.init(init.gpa, init.io, init.environ_map, device);
+fn run(init: std.process.Init, device: ?[]const u8, backdrop: backdrop_mod.Options) !void {
+    var app = try App.init(init.gpa, init.io, init.environ_map, device, backdrop);
 
     if (device) |needle| {
         if (app.devices.len > 0 and audio.find(app.devices, needle) == null) {
@@ -87,7 +100,10 @@ fn run(init: std.process.Init, device: ?[]const u8) !void {
         // PollEvent can resize the window mid-frame and invalidate target dimensions.
         c.SDL_PumpEvents();
         try win.begin(frame_start);
-        if (try queuedEvents(&backend, &win)) break;
+        if (try queuedEvents(&backend, &win)) {
+            app.release();
+            break;
+        }
 
         app.gpu_frame = .{
             .cmd = backend.cmd,
@@ -95,6 +111,7 @@ fn run(init: std.process.Init, device: ?[]const u8) !void {
         };
         app.frame();
         const frame_end = try win.end(.{});
+
 
         // dvui has no animation to wait for, so this wait is what paces the
         // waveform. It has to be the part of the frame budget the frame has
@@ -150,11 +167,14 @@ fn listDevices(init: std.process.Init) void {
 
 fn usage() void {
     std.debug.print(
-        \\usage: alchiviz [--device <name>] [--list-devices]
+        \\usage: alchiviz [--device <name>] [--backdrop <file>] [--tiles <n>] [--list-devices]
         \\
         \\  --device <name>   recording device to visualize, matched on part of
         \\                    its name (default: a system loopback when one is
         \\                    installed, otherwise the system recording device)
+        \\  --backdrop <file> image painted across the whole frame before the
+        \\                    waveform, so the fold repeats it
+        \\  --tiles <n>       copies of the backdrop across the frame (default 8)
         \\  --list-devices    print the recording devices and exit
         \\
     , .{});
