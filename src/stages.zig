@@ -23,7 +23,7 @@ pub const Stage = enum {
                 "picks the radial law: tunnel takes the log radius, so rings keep their thickness " ++
                 "and the picture recedes; rings takes the radius straight, so each copy is wider " ++
                 "than the one inside it and the frame expands outward. The window slider sets how " ++
-                "many rings fit and wander breathes that window. Off, the capture is drawn flat " ++
+                "many rings fit; its wander tick lets the master intensity vary that scale. Off, the capture is drawn flat " ++
                 "at full size with the panels over it.",
             .continuous => "Samples connected bands without wrapping the outer edge back to the centre or " ++
                 "turning each lane separately. Off wraps the full-reach endpoint to the centre and " ++

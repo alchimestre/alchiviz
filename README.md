@@ -43,7 +43,7 @@ Input is compressed and lifted before it reaches the picture, so a quiet microph
 | slider | what it moves |
 |---|---|
 | `speed` | the effect clock's step, so lanes expand and turn faster or slower together |
-| `wander` | how far the virtual window breathes, which changes how many lanes fit on screen |
+| `wander` | master intensity for every slider whose right-hand wander tick is on; left is off |
 | `window` | the virtual window's own scale, from the real window at the left to six times it at the right |
 | `lanes` | lanes per e-fold of radius, from 0.5625 to 4.375; default 1.375 |
 | `colour` | slides the whole heat ramp around the colour wheel |
@@ -51,6 +51,10 @@ Input is compressed and lifted before it reaches the picture, so a quiet microph
 | `mirror` | kaleidoscope facets, one to thirty-two; minimum bypasses kaleidoscope mirroring |
 | `gate` | how hard quiet columns are pulled down |
 | `kick` | how much beat motion reaches the fold, from none at the left to full punch at the right |
+
+Each slider except `wander` has a wander tick on its right. Enabled values drift independently around the slider's base position. The handle stays at that base; unticking restores it. Values stay within the track, including whole mirror counts. Only `window` has wander enabled at startup.
+
+The intensity sets the excursion in slider travel, up to half the track in either direction, reflected at the ends. `window` follows its geometric track. The master remains available with `fold` off for `speed`, `colour`, `blur` and `gate`.
 
 ### Gate
 
@@ -76,7 +80,7 @@ Unavailable controls are grey and cannot be changed. Their values are kept when 
 |---|---|
 | `mirrors` off | `mirror` slider |
 | `kick` off | `kick` slider |
-| `fold` off | radial-law dropdown, `continuous`, `spin`, `mirrors`, `wander`, `window`, `lanes`, `mirror`, `kick` slider |
+| `fold` off | radial-law dropdown, `continuous`, `spin`, `mirrors`, `window`, `lanes`, `mirror`, `kick` slider |
 
 `speed` and the `kick` stage remain active with `fold` off: the clock also animates the source.
 
