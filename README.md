@@ -122,9 +122,9 @@ Keys are the names dvui uses: `a` to `z`, `zero` to `nine`, `escape`, `space`, `
 
 The `midi` menu above the panels maps a controller to the controls. Click a name, then move a knob, fader or pad: that control takes the target. `x` beside a name clears it; `unbound` means nothing drives it. The menu names the controller that last sent a message.
 
-Sliders follow the control across their whole track. Stages, folds and wander ticks flip on a press: a value over 64 turns them over, and the release does nothing. Note-on and note-off work as well as control changes, so the pads on a Launch Control bind like the buttons they are.
+Sliders follow the control across their whole track. Stages, folds and wander ticks flip on a press: the first message after a quarter second of quiet turns them over, and whatever follows in the same burst is the release. Note-on and note-off work as well as control changes, so the pads on a Launch Control bind like the buttons they are, whether they are set to Momentary or to Toggle.
 
-The column of pads beside a switch name is its mode. `latch` is right for a pad set to Momentary: the press flips it. `toggle` is right for a pad set to Toggle in Novation Components, which sends 127 and then 0 on the same control; each message is a press, so one push flips once.
+The column of pads beside a switch name is its mode. `latch` flips once per press and suits both Momentary and Toggle pads. `toggle` flips on every message, for a control that sends one message per press and nothing else.
 
 Each fold has its own row, so `tunnel`, `rings` and `mandelbrot` can each sit under a pad; pressing one selects it.
 

@@ -815,7 +815,7 @@ pub const App = struct {
                 self.saveBindings();
                 continue;
             }
-            _ = midi.apply(&self.midi_bindings, message, self.midiSink());
+            _ = midi.apply(&self.midi_bindings, message, self.midiSink(), @intCast(@divTrunc(std.Io.Clock.awake.now(self.io).nanoseconds, std.time.ns_per_ms)));
         }
         self.syncLights(input);
     }

@@ -117,12 +117,19 @@ pub const laws = blk: {
 pub const Mode = enum {
     /// The value sets the target directly; anything over half counts as on.
     absolute,
-    /// A press flips the target and a release does nothing.
+    /// A press flips the target and a release does nothing. A press is the
+    /// first message after `press_gap_ms` of quiet, so a momentary pad's 127
+    /// and its release, and a Toggle pad's single 127 *or* single 0, each
+    /// count once.
     latch,
-    /// Every message flips the target. A pad set to Toggle in Components
-    /// sends 127 and 0 on successive presses, so its release is a press here.
+    /// Every message flips the target.
     toggle,
 };
+
+/// How long a control must stay quiet for the next message to count as a new
+/// press. A momentary pad's press and release arrive within a few frames; two
+/// presses of the same pad never do.
+pub const press_gap_ms: i64 = 250;
 
 /// Sliders take a value; everything else takes a press.
 pub fn defaultMode(target: Target) Mode {
@@ -136,6 +143,8 @@ pub const Binding = struct {
     /// The last value seen, so a latch flips once per press rather than once
     /// per packet.
     last: u7 = 0,
+    /// When that value arrived, so a press is the first message of a burst.
+    last_ms: i64 = std.math.minInt(i64),
     /// What the controller's light last showed for this binding, so feedback
     /// goes out only when it changes. Not part of the config file.
     lit: ?bool = null,
@@ -246,20 +255,22 @@ pub const Sink = struct {
 
 /// Apply one message to every binding that listens to it. Returns whether
 /// anything moved.
-pub fn apply(bindings: *Bindings, message: Message, sink: Sink) bool {
+pub fn apply(bindings: *Bindings, message: Message, sink: Sink, now_ms: i64) bool {
     var changed = false;
     for (bindings.list.items) |*binding| {
         if (!binding.signature.matches(message)) continue;
         const on = switch (binding.mode) {
             .absolute => message.value >= 64,
             .latch => blk: {
-                const pressed = message.value >= 64 and binding.last < 64;
+                const pressed = now_ms - binding.last_ms >= press_gap_ms;
                 binding.last = message.value;
+                binding.last_ms = now_ms;
                 if (!pressed) continue;
                 break :blk !switched(binding.target, sink);
             },
             .toggle => blk: {
                 binding.last = message.value;
+                binding.last_ms = now_ms;
                 break :blk !switched(binding.target, sink);
             },
         };
@@ -684,12 +695,12 @@ test "a control change reaches the matching binding" {
     var law: folding.Fold = .tunnel;
     const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law };
 
-    try std.testing.expect(apply(&bindings, .{ .kind = .cc, .channel = 8, .control = 5, .value = 127 }, sink));
+    try std.testing.expect(apply(&bindings, .{ .kind = .cc, .channel = 8, .control = 5, .value = 127 }, sink, 0));
     try std.testing.expectApproxEqAbs(@as(f32, 1), values.blur, 0.001);
-    try std.testing.expect(apply(&bindings, .{ .kind = .cc, .channel = 8, .control = 5, .value = 0 }, sink));
+    try std.testing.expect(apply(&bindings, .{ .kind = .cc, .channel = 8, .control = 5, .value = 0 }, sink, 0));
     try std.testing.expectApproxEqAbs(@as(f32, 0), values.blur, 0.001);
-    try std.testing.expect(!apply(&bindings, .{ .kind = .cc, .channel = 8, .control = 6, .value = 64 }, sink));
-    try std.testing.expect(!apply(&bindings, .{ .kind = .note, .channel = 8, .control = 5, .value = 64 }, sink));
+    try std.testing.expect(!apply(&bindings, .{ .kind = .cc, .channel = 8, .control = 6, .value = 64 }, sink, 0));
+    try std.testing.expect(!apply(&bindings, .{ .kind = .note, .channel = 8, .control = 5, .value = 64 }, sink, 0));
 }
 
 test "a channel-pinned binding ignores other channels" {
@@ -707,8 +718,8 @@ test "a channel-pinned binding ignores other channels" {
     var law: folding.Fold = .tunnel;
     const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law };
 
-    try std.testing.expect(!apply(&bindings, .{ .kind = .cc, .channel = 7, .control = 5, .value = 127 }, sink));
-    try std.testing.expect(apply(&bindings, .{ .kind = .cc, .channel = 8, .control = 5, .value = 127 }, sink));
+    try std.testing.expect(!apply(&bindings, .{ .kind = .cc, .channel = 7, .control = 5, .value = 127 }, sink, 0));
+    try std.testing.expect(apply(&bindings, .{ .kind = .cc, .channel = 8, .control = 5, .value = 127 }, sink, 0));
 }
 
 test "a latch flips once per press and ignores the release" {
@@ -729,15 +740,41 @@ test "a latch flips once per press and ignores the release" {
     const pressed: Message = .{ .kind = .note, .channel = 0, .control = 41, .value = 127 };
     const released: Message = .{ .kind = .note, .channel = 0, .control = 41, .value = 0 };
     try std.testing.expect(toggles.mirrors);
-    _ = apply(&bindings, pressed, sink);
+    // A momentary pad's press and release are one click, seconds apart from the
+    // next one.
+    _ = apply(&bindings, pressed, sink, 0);
     try std.testing.expect(!toggles.mirrors);
-    // A press that repeats while held does not flip again.
-    _ = apply(&bindings, pressed, sink);
+    _ = apply(&bindings, released, sink, 40);
     try std.testing.expect(!toggles.mirrors);
-    _ = apply(&bindings, released, sink);
-    try std.testing.expect(!toggles.mirrors);
-    _ = apply(&bindings, pressed, sink);
+    _ = apply(&bindings, pressed, sink, 2000);
     try std.testing.expect(toggles.mirrors);
+    _ = apply(&bindings, released, sink, 2040);
+    try std.testing.expect(toggles.mirrors);
+}
+
+test "a toggle pad flips once per press whatever value it sends" {
+    var bindings: Bindings = .{};
+    defer bindings.deinit(std.testing.allocator);
+    try bindings.put(std.testing.allocator, .{
+        .signature = .{ .kind = .cc, .channel = 0, .control = 37 },
+        .target = .{ .stage = .mirrors },
+        .mode = .latch,
+    });
+    var values: wander.Values = .{};
+    var intensity: f32 = 0;
+    var wandering: std.EnumSet(wander.Parameter) = .empty;
+    var toggles: stages.Toggles = .{};
+    var law: folding.Fold = .tunnel;
+    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law };
+
+    // A pad set to Toggle in Components sends 127, then 0, then 127…
+    try std.testing.expect(toggles.mirrors);
+    _ = apply(&bindings, .{ .kind = .cc, .channel = 0, .control = 37, .value = 127 }, sink, 0);
+    try std.testing.expect(!toggles.mirrors);
+    _ = apply(&bindings, .{ .kind = .cc, .channel = 0, .control = 37, .value = 0 }, sink, 2000);
+    try std.testing.expect(toggles.mirrors);
+    _ = apply(&bindings, .{ .kind = .cc, .channel = 0, .control = 37, .value = 127 }, sink, 4000);
+    try std.testing.expect(!toggles.mirrors);
 }
 
 test "a toggle pad flips on both of its values" {
@@ -758,11 +795,11 @@ test "a toggle pad flips on both of its values" {
     const button: Signature = .{ .kind = .note, .channel = 0, .control = 42 };
     try std.testing.expect(toggles.spin);
     // A pad set to Toggle in Components sends 127, then 0, then 127…
-    _ = apply(&bindings, .{ .kind = button.kind, .channel = 0, .control = 42, .value = 127 }, sink);
+    _ = apply(&bindings, .{ .kind = button.kind, .channel = 0, .control = 42, .value = 127 }, sink, 0);
     try std.testing.expect(!toggles.spin);
-    _ = apply(&bindings, .{ .kind = button.kind, .channel = 0, .control = 42, .value = 0 }, sink);
+    _ = apply(&bindings, .{ .kind = button.kind, .channel = 0, .control = 42, .value = 0 }, sink, 0);
     try std.testing.expect(toggles.spin);
-    _ = apply(&bindings, .{ .kind = button.kind, .channel = 0, .control = 42, .value = 127 }, sink);
+    _ = apply(&bindings, .{ .kind = button.kind, .channel = 0, .control = 42, .value = 127 }, sink, 0);
     try std.testing.expect(!toggles.spin);
 }
 
@@ -786,10 +823,10 @@ test "each fold picks its law from its own pad" {
     var law: folding.Fold = .mandelbrot;
     const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law };
 
-    _ = apply(&bindings, .{ .kind = .note, .channel = 0, .control = 51, .value = 127 }, sink);
+    _ = apply(&bindings, .{ .kind = .note, .channel = 0, .control = 51, .value = 127 }, sink, 0);
     try std.testing.expectEqual(folding.Fold.rings, law);
 
-    _ = apply(&bindings, .{ .kind = .note, .channel = 0, .control = 50, .value = 127 }, sink);
+    _ = apply(&bindings, .{ .kind = .note, .channel = 0, .control = 50, .value = 127 }, sink, 0);
     try std.testing.expectEqual(folding.Fold.tunnel, law);
 
     // A selected fold is lit; the pads for the others are dark.
@@ -853,7 +890,7 @@ test "two bindings on one control move both targets" {
     var toggles: stages.Toggles = .{};
     var law: folding.Fold = .tunnel;
     const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law };
-    _ = apply(&bindings, .{ .kind = .cc, .channel = 3, .control = 20, .value = 127 }, sink);
+    _ = apply(&bindings, .{ .kind = .cc, .channel = 3, .control = 20, .value = 127 }, sink, 0);
     try std.testing.expectApproxEqAbs(@as(f32, 1), values.blur, 0.001);
     try std.testing.expectApproxEqAbs(wander.Parameter.speed.track().max, values.speed, 0.001);
 }
