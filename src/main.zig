@@ -9,6 +9,7 @@ const audio = @import("audio.zig");
 const tap = @import("tap.zig");
 const App = @import("app.zig").App;
 const backdrop_mod = @import("backdrop.zig");
+const midi = @import("midi.zig");
 
 /// One frame at 60 Hz, in microseconds.
 const frame_budget_us: u32 = 16_667;
@@ -28,6 +29,10 @@ pub fn main(init: std.process.Init) !void {
         }
         if (std.mem.eql(u8, arg, "--list-devices")) {
             return listDevices(init);
+        }
+        if (std.mem.eql(u8, arg, "--list-midi")) {
+            midi.listSources();
+            return;
         }
         if (std.mem.eql(u8, arg, "--device")) {
             device = args.next() orelse return error.MissingDeviceName;
@@ -167,7 +172,7 @@ fn listDevices(init: std.process.Init) void {
 
 fn usage() void {
     std.debug.print(
-        \\usage: alchiviz [--device <name>] [--backdrop <file>] [--tiles <n>] [--list-devices]
+        \\usage: alchiviz [--device <name>] [--backdrop <file>] [--tiles <n>] [--list-devices] [--list-midi]
         \\
         \\  --device <name>   recording device to visualize, matched on part of
         \\                    its name (default: a system loopback when one is
@@ -176,6 +181,7 @@ fn usage() void {
         \\                    waveform, so the fold repeats it
         \\  --tiles <n>       copies of the backdrop across the frame (default 8)
         \\  --list-devices    print the recording devices and exit
+        \\  --list-midi       print the midi sources and exit
         \\
     , .{});
 }
