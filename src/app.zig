@@ -121,6 +121,8 @@ pub const App = struct {
     midi_bindings: midi.Bindings = .{},
     midi_learn: ?midi.Target = null,
     midi_last: ?midi.Message = null,
+    /// Why the last bind or write failed; the menu shows it until one works.
+    midi_status: ?[]const u8 = null,
     /// Where the keybinds and the midi table live, borrowed from the process.
     environ: *const std.process.Environ.Map,
     /// The panels' rects once drawn, so the fold leaves them flat and they can
@@ -663,6 +665,14 @@ pub const App = struct {
             .id_extra = 511,
         });
 
+        if (self.midi_status) |status| {
+            dvui.labelNoFmt(@src(), status, .{}, .{
+                .font = .theme(.body),
+                .color_text = .{ .color = dvui.Color{ .r = 0xff, .g = 0x55, .b = 0x55 } },
+                .id_extra = 515,
+            });
+        }
+
         if (self.midi_learn) |target| {
             dvui.label(@src(), "move a control for {s}", .{target.name()}, .{
                 .font = .theme(.body),
@@ -765,12 +775,15 @@ pub const App = struct {
         while (input.next()) |message| {
             self.midi_last = message;
             if (self.midi_learn) |target| {
+                self.midi_learn = null;
                 self.midi_bindings.assign(self.allocator, .{
                     .signature = message.signature(),
                     .target = target,
                     .mode = midi.defaultMode(target),
-                }) catch {};
-                self.midi_learn = null;
+                }) catch |err| {
+                    self.midi_status = midi.describe(err);
+                    continue;
+                };
                 self.saveBindings();
                 continue;
             }
@@ -785,17 +798,17 @@ pub const App = struct {
 
     /// Write the table back, so a learned control survives a restart.
     fn saveBindings(self: *App) void {
-        const text = self.midi_bindings.text(self.allocator) catch return;
-        defer self.allocator.free(text);
-
         var path_buffer: [1024]u8 = undefined;
-        const path = midi.configPath(self.environ, &path_buffer) orelse return;
-        if (std.fs.path.dirname(path)) |directory| {
-            std.Io.Dir.cwd().createDirPath(self.io, directory) catch {};
-        }
-        std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = path, .data = text }) catch |err| {
-            std.debug.print("cannot save midi bindings: {s}\n", .{@errorName(err)});
+        const path = midi.configPath(self.environ, &path_buffer) orelse {
+            self.midi_status = "no config directory: set HOME or XDG_CONFIG_HOME";
+            return;
         };
+        midi.save(self.allocator, self.io, path, &self.midi_bindings) catch |err| {
+            std.debug.print("cannot save midi bindings: {s}\n", .{@errorName(err)});
+            self.midi_status = midi.describe(err);
+            return;
+        };
+        self.midi_status = null;
     }
 
     /// Remember a panel's rect so the fold leaves it flat and it is painted

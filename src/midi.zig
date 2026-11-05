@@ -324,6 +324,25 @@ pub fn load(allocator: std.mem.Allocator, environ: *const std.process.Environ.Ma
     return bindings;
 }
 
+/// Write the table back, so a learned control survives a restart.
+pub fn save(allocator: std.mem.Allocator, io: std.Io, path: []const u8, bindings: *const Bindings) !void {
+    const text = try bindings.text(allocator);
+    defer allocator.free(text);
+
+    if (std.fs.path.dirname(path)) |directory| {
+        try std.Io.Dir.cwd().createDirPath(io, directory);
+    }
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = text });
+}
+
+/// One line for the menu when a bind or a write failed.
+pub fn describe(err: anyerror) []const u8 {
+    return switch (err) {
+        error.OutOfMemory => "out of memory storing the binding",
+        else => "could not write the midi config",
+    };
+}
+
 /// Where the bindings live on disk, beside the keybinds.
 pub fn configPath(environ: *const std.process.Environ.Map, buffer: []u8) ?[]const u8 {
     if (environ.get("XDG_CONFIG_HOME")) |base| {
@@ -715,4 +734,64 @@ test "the config path follows the home directory" {
     defer environ.deinit();
     var buffer: [1024]u8 = undefined;
     try std.testing.expect(configPath(&environ, &buffer) == null);
+}
+
+test "a saved table reads back" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var base_buffer: [256]u8 = undefined;
+    const base = try std.fmt.bufPrint(&base_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var environ: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environ.deinit();
+    try environ.put("XDG_CONFIG_HOME", base);
+
+    var path_buffer: [1024]u8 = undefined;
+    const path = configPath(&environ, &path_buffer) orelse return error.NoConfigPath;
+
+    var bindings: Bindings = .{};
+    defer bindings.deinit(std.testing.allocator);
+    try bindings.put(std.testing.allocator, .{
+        .signature = .{ .kind = .cc, .channel = 8, .control = 5 },
+        .target = .{ .knob = .speed },
+        .mode = .absolute,
+    });
+    try bindings.put(std.testing.allocator, .{
+        .signature = .{ .kind = .note, .channel = 0, .control = 36 },
+        .target = .intensity,
+        .mode = .latch,
+    });
+    try save(std.testing.allocator, std.testing.io, path, &bindings);
+
+    var loaded = load(std.testing.allocator, &environ, std.testing.io);
+    defer loaded.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(bindings.list.items.len, loaded.list.items.len);
+    for (bindings.list.items) |binding| {
+        const read_back = loaded.forTarget(binding.target) orelse return error.LostBinding;
+        try std.testing.expectEqual(binding.signature, read_back.signature);
+        // The file carries the control, not the mode: the target picks the mode.
+        try std.testing.expectEqual(defaultMode(binding.target), read_back.mode);
+    }
+}
+
+test "a save that cannot create its directory says so" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var blocker_buffer: [256]u8 = undefined;
+    const blocker = try std.fmt.bufPrint(&blocker_buffer, ".zig-cache/tmp/{s}/blocker", .{tmp.sub_path});
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = blocker, .data = "" });
+
+    var path_buffer: [512]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/alchiviz/midi.conf", .{blocker});
+
+    var bindings: Bindings = .{};
+    defer bindings.deinit(std.testing.allocator);
+    try bindings.put(std.testing.allocator, .{
+        .signature = .{ .kind = .cc, .channel = 1, .control = 2 },
+        .target = .intensity,
+        .mode = .absolute,
+    });
+    try std.testing.expectError(error.NotDir, save(std.testing.allocator, std.testing.io, path, &bindings));
 }
