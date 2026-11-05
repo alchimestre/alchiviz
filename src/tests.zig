@@ -14,5 +14,6 @@ test {
     _ = @import("blurbs.zig");
     _ = @import("audio.zig");
     _ = @import("tap.zig");
+    _ = @import("midi.zig");
     _ = @import("app.zig");
 }

@@ -15,6 +15,7 @@ const blurbs = @import("blurbs.zig");
 const wander = @import("wander.zig");
 const fractal_motion = @import("fractal_motion.zig");
 const backdrop_mod = @import("backdrop.zig");
+const midi = @import("midi.zig");
 
 const panel = dvui.Color{ .r = 0x14, .g = 0x14, .b = 0x1f, .a = 0xff };
 const ink = dvui.Color{ .r = 0xf8, .g = 0xf8, .b = 0xf2, .a = 0xff };
@@ -115,9 +116,17 @@ pub const App = struct {
     /// from the keys file.
     ui_hidden: bool = false,
     binds: keys.Binds = .{},
+    /// The controller port, its bindings and the target waiting for a control.
+    controller: ?*midi.Input = null,
+    midi_bindings: midi.Bindings = .{},
+    midi_learn: ?midi.Target = null,
+    midi_last: ?midi.Message = null,
+    /// Where the keybinds and the midi table live, borrowed from the process.
+    environ: *const std.process.Environ.Map,
     /// The panels' rects once drawn, so the fold leaves them flat and they can
-    /// be painted back exact: the input pane, the stage pane, the blurb.
-    stills: [3]dvui.Rect.Physical = .{ .{}, .{}, .{} },
+    /// be painted back exact: the input pane, the stage pane, the blurb, and
+    /// the open midi menu.
+    stills: [4]dvui.Rect.Physical = .{ .{}, .{}, .{}, .{} },
 
     error_text: []u8 = &.{},
 
@@ -163,6 +172,7 @@ pub const App = struct {
             .binds = keys.load(environ, io),
             .allocator = allocator,
             .io = io,
+            .environ = environ,
             .devices = devices,
             .names = names,
             .selected = chosen,
@@ -172,6 +182,14 @@ pub const App = struct {
             .backdrop_tiles = backdrop.tiles,
         };
         system_tap = null;
+
+        // A controller that will not open must not stop the window: the menu
+        // then says so, and the mouse still moves everything.
+        app.controller = midi.Input.start(allocator) catch |err| blk: {
+            std.debug.print("midi unavailable ({s})\n", .{@errorName(err)});
+            break :blk null;
+        };
+        app.midi_bindings = midi.load(allocator, environ, io);
 
         // A backdrop that will not load leaves the frame as it was, with the
         // reason on screen and in the log instead of nowhere.
@@ -201,6 +219,9 @@ pub const App = struct {
         self.ring = null;
         self.fold_cache.deinit();
         self.backdrop.deinit();
+        if (self.controller) |input| input.stop(self.allocator);
+        self.controller = null;
+        self.midi_bindings.deinit(self.allocator);
         if (self.error_text.len > 0) self.allocator.free(self.error_text);
         self.error_text = &.{};
         self.allocator.free(self.names);
@@ -380,6 +401,8 @@ pub const App = struct {
             .margin = .{ .x = 12, .y = 12, .w = 12, .h = 12 },
         });
         defer root.deinit();
+
+        self.menuBar();
 
         // Scoped so the row closes before the blurb: an open box takes the
         // next widget into itself, which would lay the blurb out beside the
@@ -606,6 +629,175 @@ pub const App = struct {
         self.keepFlat(2, strip.data().rectScaleFromParent().r);
     }
 
+    /// The menu bar. It holds one item: the controller map.
+    fn menuBar(self: *App) void {
+        var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = 500 });
+        defer bar.deinit();
+
+        var menu = dvui.menu(@src(), .horizontal, .{ .id_extra = 501 });
+        defer menu.deinit();
+
+        if (dvui.menuItemLabel(@src(), "midi", .{ .submenu = true }, .{
+            .font = .theme(.body),
+            .color_text = .{ .color = ink },
+            .id_extra = 502,
+        })) |anchor| {
+            self.midiMenu(anchor);
+        } else {
+            // The menu's flat rect belongs to the fold only while it is open.
+            self.stills[3] = .{};
+        }
+    }
+
+    /// Every control that can be mapped, with what drives it. Clicking a name
+    /// arms it, and the next control that moves takes it.
+    fn midiMenu(self: *App, anchor: dvui.Rect.Natural) void {
+        var menu = dvui.floatingMenu(@src(), .{ .from = anchor }, .{ .id_extra = 510 });
+        defer menu.deinit();
+        self.keepFlat(3, menu.data().rectScaleFromParent().r);
+
+        const device = if (self.controller) |input| input.deviceName() else "midi unavailable";
+        dvui.label(@src(), "controller: {s}", .{device}, .{
+            .font = .theme(.body),
+            .color_text = .{ .color = ink },
+            .id_extra = 511,
+        });
+
+        if (self.midi_learn) |target| {
+            dvui.label(@src(), "move a control for {s}", .{target.name()}, .{
+                .font = .theme(.body),
+                .color_text = .{ .color = dvui.Color{ .r = 0xff, .g = 0xc0, .b = 0x40 } },
+                .id_extra = 512,
+            });
+        } else {
+            dvui.labelNoFmt(@src(), "click a name, then move a knob or pad", .{}, .{
+                .font = .theme(.body),
+                .color_text = .{ .color = muted },
+                .id_extra = 512,
+            });
+        }
+
+        if (self.midi_last) |message| {
+            dvui.label(@src(), "last {s} {d} = {d}", .{
+                @tagName(message.kind), message.control, message.value,
+            }, .{
+                .font = .theme(.body),
+                .color_text = .{ .color = muted },
+                .id_extra = 513,
+            });
+        }
+
+        var columns = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = 514 });
+        defer columns.deinit();
+
+        self.midiColumn("sliders", &midi.sliders, 520);
+        self.midiColumn("stages", &midi.stages_list, 580);
+        self.midiColumn("wander ticks", &midi.wander_ticks, 640);
+    }
+
+    fn midiColumn(self: *App, title: []const u8, targets: []const midi.Target, id: u32) void {
+        var column = dvui.box(@src(), .{ .dir = .vertical }, .{
+            .id_extra = id,
+            .margin = .{ .x = 8, .w = 8 },
+        });
+        defer column.deinit();
+
+        dvui.labelNoFmt(@src(), title, .{}, .{
+            .font = .theme(.body),
+            .color_text = .{ .color = muted },
+            .id_extra = id + 1,
+        });
+        for (targets, 0..) |target, index| {
+            self.midiRow(target, id + 4 + @as(u32, @intCast(index)) * 4);
+        }
+    }
+
+    /// One mappable control: its name, what drives it, and a way to clear that.
+    fn midiRow(self: *App, target: midi.Target, id: u32) void {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .id_extra = id,
+            .min_size_content = .{ .w = 200, .h = 18 },
+        });
+        defer row.deinit();
+
+        const armed = if (self.midi_learn) |learning| std.meta.eql(learning, target) else false;
+        if (dvui.button(@src(), if (armed) "..." else target.name(), .{}, .{
+            .font = .theme(.body),
+            .color_text = .{ .color = ink },
+            .gravity_y = 0.5,
+            .min_size_content = .{ .w = 76, .h = 16 },
+            .id_extra = id + 1,
+        })) self.midi_learn = target;
+
+        var buffer: [32]u8 = undefined;
+        const binding = self.midi_bindings.forTarget(target) orelse {
+            dvui.labelNoFmt(@src(), "unbound", .{}, .{
+                .font = .theme(.body),
+                .color_text = .{ .color = muted },
+                .gravity_y = 0.5,
+                .id_extra = id + 2,
+            });
+            return;
+        };
+
+        dvui.labelNoFmt(@src(), binding.signature.label(&buffer), .{}, .{
+            .font = .theme(.body),
+            .color_text = .{ .color = ink },
+            .gravity_y = 0.5,
+            .id_extra = id + 2,
+        });
+        if (dvui.button(@src(), "x", .{}, .{
+            .font = .theme(.body),
+            .color_text = .{ .color = muted },
+            .gravity_y = 0.5,
+            .min_size_content = .{ .w = 14, .h = 14 },
+            .padding = dvui.Rect.all(1),
+            .id_extra = id + 3,
+        })) {
+            self.midi_bindings.removeTarget(target);
+            self.saveBindings();
+        }
+    }
+
+    /// Drain the controller and write into the same values the mouse writes.
+    fn pollMidi(self: *App) void {
+        const input = self.controller orelse return;
+        while (input.next()) |message| {
+            self.midi_last = message;
+            if (self.midi_learn) |target| {
+                self.midi_bindings.assign(self.allocator, .{
+                    .signature = message.signature(),
+                    .target = target,
+                    .mode = midi.defaultMode(target),
+                }) catch {};
+                self.midi_learn = null;
+                self.saveBindings();
+                continue;
+            }
+            _ = midi.apply(&self.midi_bindings, message, .{
+                .values = &self.sliders,
+                .intensity = &self.wandering.intensity,
+                .wandering = &self.wandering.enabled,
+                .toggles = &self.toggles,
+            });
+        }
+    }
+
+    /// Write the table back, so a learned control survives a restart.
+    fn saveBindings(self: *App) void {
+        const text = self.midi_bindings.text(self.allocator) catch return;
+        defer self.allocator.free(text);
+
+        var path_buffer: [1024]u8 = undefined;
+        const path = midi.configPath(self.environ, &path_buffer) orelse return;
+        if (std.fs.path.dirname(path)) |directory| {
+            std.Io.Dir.cwd().createDirPath(self.io, directory) catch {};
+        }
+        std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = path, .data = text }) catch |err| {
+            std.debug.print("cannot save midi bindings: {s}\n", .{@errorName(err)});
+        };
+    }
+
     /// Remember a panel's rect so the fold leaves it flat and it is painted
     /// back exact. A rect is only known once the box has laid its children out.
     fn keepFlat(self: *App, slot: usize, rect: dvui.Rect.Physical) void {
@@ -813,6 +1005,7 @@ pub const App = struct {
 
     /// Move the clock with the capture and follow its loudness.
     fn pump(self: *App) void {
+        self.pollMidi();
         const now = std.Io.Clock.awake.now(self.io).nanoseconds;
         self.now_ns = now;
         const seconds = if (now > self.last_ns)

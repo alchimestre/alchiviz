@@ -118,6 +118,24 @@ h = toggle-ui
 
 Keys are the names dvui uses: `a` to `z`, `zero` to `nine`, `escape`, `space`, `f1` to `f25`.
 
+## MIDI
+
+The `midi` menu above the panels maps a controller to the controls. Click a name, then move a knob, fader or pad: that control takes the target. `x` beside a name clears it; `unbound` means nothing drives it. The menu names the controller that last sent a message.
+
+Sliders follow the control across their whole track. Stages and wander ticks flip on a press: a value over 64 turns them over, and the release does nothing. Note-on and note-off work as well as control changes, so the pads on a Launch Control bind like the buttons they are.
+
+Bindings live in `$XDG_CONFIG_HOME/alchiviz/midi.conf`, or `~/.config/alchiviz/midi.conf` when `XDG_CONFIG_HOME` is unset. The app writes the file when a binding changes; it can also be edited by hand.
+
+```
+#   cc 5 = speed              a control change drives a slider
+#   note 41 = stage fold      a pad flips a switch
+#   ch 8 cc 5 = blur          "ch" pins the channel, 0 to 15; omit it for any
+#   cc 20 = speed             two lines on one control are a macro: that
+#   cc 20 = blur              control then moves both targets
+```
+
+Every source CoreMIDI reports is connected, so a controller that talks on the DAW port and one that talks on its MIDI port both work. `--list-midi` prints those sources. A controller plugged in after the window opens needs a restart.
+
 ## Input
 
 | Flag | Effect |
@@ -127,6 +145,7 @@ Keys are the names dvui uses: `a` to `z`, `zero` to `nine`, `escape`, `space`, `
 | `--backdrop <file>` | image tiled across the frame under the waveform |
 | `--tiles <n>` | copies of the backdrop across the width (default 8) |
 | `--list-devices` | print recording devices (`*` marks the default choice) and exit |
+| `--list-midi` | print the MIDI sources CoreMIDI reports and exit |
 
 The backdrop repeats as a grid of square cells, `--tiles` copies across the
 width and as many rows as fit. It is sampled nearest so pixel art stays sharp,
@@ -159,6 +178,7 @@ zig build test
 | `src/main.zig` | argument parsing, window loop |
 | `src/app.zig` | capture, levels, waveform texture, fold draw, controls |
 | `src/audio.zig` | recording devices, capture stream |
+| `src/midi.zig` | controller input, the binding table and its config file |
 | `src/tap.zig` | the system-output tap and its aggregate device |
 | `src/signal.zig` | sample history ring, band split, column statistics |
 | `src/wave.zig` | waveform bars and their colour |

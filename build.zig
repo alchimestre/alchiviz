@@ -18,6 +18,14 @@ pub fn build(b: *std.Build) void {
     sdl_translate.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdl_prefix, "include" }) });
     const sdlc = sdl_translate.createModule();
 
+    // Controllers arrive through CoreMIDI, which only exists on macOS.
+    const midi_translate = b.addTranslateC(.{
+        .root_source_file = b.path("src/midi.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const midic = midi_translate.createModule();
+
     // dvui compiles SDL3 from source unless the system copy is enabled; two
     // copies of SDL in one process duplicate every Objective-C class.
     _ = b.systemIntegrationOption("sdl3", .{ .default = true });
@@ -35,6 +43,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "dvui", .module = dvui.module("dvui_sdl3gpu") },
         .{ .name = "sdl-backend", .module = dvui.module("sdl3gpu") },
         .{ .name = "sdl3-c", .module = sdlc },
+        .{ .name = "midi-c", .module = midic },
     };
 
     const exe = b.addExecutable(.{
@@ -71,6 +80,8 @@ fn linkSdl(b: *std.Build, mod: *std.Build.Module, prefix: []const u8) void {
     mod.linkSystemLibrary("SDL3", .{});
     // The system-output tap is a CoreAudio object reached through Foundation.
     mod.linkFramework("CoreAudio", .{});
+    mod.linkFramework("CoreMIDI", .{});
+    mod.linkFramework("CoreFoundation", .{});
     mod.linkFramework("Foundation", .{});
     mod.linkSystemLibrary("objc", .{});
     mod.link_libc = true;
