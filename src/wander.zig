@@ -1,5 +1,5 @@
 const std = @import("std");
-const dmt = @import("dmt.zig");
+const folding = @import("fold.zig");
 
 const phase_spacing: f64 = 71.3;
 const maximum_excursion: f32 = 0.5;
@@ -14,14 +14,14 @@ pub const Parameter = enum {
     gate,
     kick,
 
-    pub fn track(self: Parameter) dmt.Track {
+    pub fn track(self: Parameter) folding.Track {
         return switch (self) {
-            .speed => dmt.speed_track,
-            .window => dmt.window_track,
-            .lanes => dmt.rings_track,
-            .mirror => dmt.mirrors_track,
-            .gate => dmt.gate_track,
-            .kick => dmt.kick_track,
+            .speed => folding.speed_track,
+            .window => folding.window_track,
+            .lanes => folding.rings_track,
+            .mirror => folding.mirrors_track,
+            .gate => folding.gate_track,
+            .kick => folding.kick_track,
             .colour, .blur => .{ .min = 0, .max = 1 },
         };
     }
@@ -30,7 +30,7 @@ pub const Parameter = enum {
 pub const Values = struct {
     speed: f32 = 1,
     window: f32 = 1,
-    lanes: f32 = dmt.rings_default,
+    lanes: f32 = folding.rings_default,
     colour: f32 = 0,
     blur: f32 = 0,
     mirror: f32 = 4,
@@ -49,7 +49,7 @@ pub const State = struct {
             if (self.enabled.contains(parameter)) {
                 const track = parameter.track();
                 const phase = @as(f64, @floatFromInt(@backingInt(parameter))) * phase_spacing;
-                const offset = dmt.wander(time + phase, self.intensity * maximum_excursion);
+                const offset = folding.wander(time + phase, self.intensity * maximum_excursion);
                 const position = @abs(track.fraction(@field(base, @tagName(parameter))) + offset);
                 const reflected = if (position > 1) 2 - position else position;
                 @field(animated, @tagName(parameter)) = track.value(reflected);

@@ -5,7 +5,9 @@ test {
     _ = @import("wave.zig");
     _ = @import("image.zig");
     _ = @import("backdrop.zig");
-    _ = @import("dmt.zig");
+    _ = @import("fold.zig");
+    _ = @import("mandelbrot.zig");
+    _ = @import("fractal_motion.zig");
     _ = @import("wander.zig");
     _ = @import("geom.zig");
     _ = @import("stages.zig");

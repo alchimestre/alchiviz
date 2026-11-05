@@ -1,8 +1,7 @@
 # alchiviz
 
-Real-time DMT tunnel fed by a live audio input. The capture is drawn as nested depth
-layers through a heat ramp, then folded into a tunnel by the same transform as
-alchimix's DMT mode.
+Real-time audio visualiser with texture folds. The capture is drawn as nested
+depth layers through a heat ramp, then folded across the screen.
 
 ## Requirements
 
@@ -27,12 +26,9 @@ The capture is drawn as terrain: eighteen depth layers of the same waveform,
 each smaller, dimmer and shifted by wandering noise, painted through a heat
 ramp indexed by loudness, depth and column, so the frame spans the whole ramp.
 
-That frame is then folded into lanes: the radius picks the lane, alternate lanes
-are reflected so the picture mirrors outward, and each lane starts its sweep at a
-different point of the frame. The clock spins the sampling frame, and radial
-shear twists it with depth. The mirror fold acts on that spun and sheared angle
-to produce kaleidoscope facets. The panel is masked out of the fold and painted
-back sharp.
+Tunnel and rings fold the frame into radial lanes. Mandelbrot uses escape time
+and orbit angle to select pixels from that same frame. The clock, mirrors and
+depth shear move the sampled texture. The panels stay sharp over the fold.
 
 ## Loudness
 
@@ -66,13 +62,30 @@ Use `continuous` in the right panel to compare connected bands with endpoint wra
 
 | stage | what it does | off |
 |---|---|---|
-| `fold` | maps the window back into the frame; the dropdown picks the radial law | the capture, flat |
-| `continuous` | samples connected bands without wrapping the outer edge back to the centre or turning each lane separately; reflects alternate bands in either radial law | wraps the full-reach endpoint to the centre and rotates each lane |
+| `fold` | maps the window back into the frame through the selected mapping | the capture, flat |
+| `continuous` | samples connected bands, reflects alternate bands and skips per-lane rotation | wraps the full-reach endpoint to the centre and rotates each lane |
 | `spin` | turns the sampling frame with the clock | fixed frame |
 | `mirrors` | kaleidoscope facets, count from the `mirror` slider | one unfolded sample |
 | `kick` | everything the beat does: pushes the rings out, adds lanes, widens the window, hurries the clock | the fold stops moving with the music |
 
-The `fold` row also has a dropdown for the radial law. `tunnel` takes the log radius, so rings keep their screen thickness and the picture recedes. `rings` takes the radius straight, so each copy is wider than the one inside it and the frame expands outward from the middle. The tick beside the dropdown switches the whole fold off.
+Choose a mapping in the `fold` dropdown. Its tick switches the whole fold off.
+
+| Mapping | Texture coordinates |
+|---|---|
+| `tunnel` | log radius and screen angle |
+| `rings` | linear radius and screen angle |
+| `mandelbrot` | smooth escape time and orbit angle from `z = z*z + c`, starting at `z = 0` |
+
+Mandelbrot visits each of three boundary regions for sixty effect-clock seconds.
+The camera magnifies each view 160 times over the first fifty-four seconds.
+The final six seconds hold both cameras and crossfade the pictures.
+`speed` controls the pace. The route repeats every three effect-clock minutes.
+
+`kick` applies a small, smoothed texture pulse without changing the camera,
+lane count or clock pace. Lane changes are gradual; lane boundaries stay connected.
+`continuous` disables separate lane rotation.
+Each orbit uses at most 192 iterations. Fractal edges use one sample per pixel.
+`window` adjusts framing. Spin and mirrors alter the sampled image.
 
 Unavailable controls are grey and cannot be changed. Their values are kept when switching modes.
 
@@ -80,15 +93,15 @@ Unavailable controls are grey and cannot be changed. Their values are kept when 
 |---|---|
 | `mirrors` off | `mirror` slider |
 | `kick` off | `kick` slider |
-| `fold` off | radial-law dropdown, `continuous`, `spin`, `mirrors`, `window`, `lanes`, `mirror`, `kick` slider |
+| `fold` off | mapping dropdown, `continuous`, `spin`, `mirrors`, `window`, `lanes`, `mirror`, `kick` slider |
 
 `speed` and the `kick` stage remain active with `fold` off: the clock also animates the source.
 
 ## Rendering
 
-`src/wave.zig` builds the frame; `src/stages.zig` lists the fold's stages and their descriptions, and `src/dmt.zig` flattens the switched-off ones in one `dmt.Lens` before either the shader or the CPU fold sees them.
+`src/wave.zig` builds the frame; `src/stages.zig` lists the fold's stages and their descriptions, and `src/fold.zig` flattens the switched-off ones in one `folding.Lens` before either the shader or the CPU fold sees them.
 
-Drawing goes through dvui on SDL3's GPU backend (Metal on macOS). The tunnel itself is a fragment shader: one fullscreen triangle drawn into the swapchain before dvui draws the panel over it, so the fold costs the CPU nothing per frame. `src/gpu.zig` holds the shader and the pipeline; it reproduces the same fold the CPU code in `src/dmt.zig` does.
+Drawing goes through dvui on SDL3's GPU backend (Metal on macOS). The fold is a fragment shader: one fullscreen triangle drawn into the swapchain before dvui draws the panel over it. `src/gpu.zig` holds the shader and the pipeline; it reproduces the same fold the CPU code in `src/fold.zig` does.
 
 OS events are pumped before each frame starts. Fullscreen and resize transitions cannot change the active frame's render-target dimensions.
 
@@ -149,5 +162,6 @@ zig build test
 | `src/tap.zig` | the system-output tap and its aggregate device |
 | `src/signal.zig` | sample history ring, band split, column statistics |
 | `src/wave.zig` | waveform bars and their colour |
-| `src/dmt.zig` | the fold, its clock and its mesh |
+| `src/fold.zig` | the fold, its clock and its mesh |
+| `src/mandelbrot.zig` | boundary-region reference orbits and zoom route |
 | `src/geom.zig` | triangle grid helpers |

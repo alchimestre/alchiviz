@@ -1,5 +1,4 @@
-//! The tunnel drawn by the GPU. `dmt.fold` on the CPU is the reference this
-//! shader mirrors, formula for formula; change one and the other follows. One fullscreen triangle into the swapchain,
+//! GPU texture folds, matching `folding.fold` on the CPU. One fullscreen triangle into the swapchain,
 //! its fragment shader running the same fold the CPU version does, recorded
 //! into dvui's command buffer before dvui draws the panel on top. dvui's final
 //! pass loads, so the tunnel stays under the UI.
@@ -10,7 +9,8 @@ const SDLBackend = @import("sdl-backend");
 /// The backend's own c module instance: SDL types from another instance of
 /// the module are distinct types to Zig even though they are identical.
 const c = SDLBackend.c;
-const dmt = @import("dmt.zig");
+const folding = @import("fold.zig");
+const mandelbrot = @import("mandelbrot.zig");
 
 /// The backend's own message for the last shader failure, so it can be shown in
 /// the window when the tunnel falls back to the CPU.
@@ -42,8 +42,7 @@ pub const Uniforms = extern struct {
     calm: f32,
     fold_kind: f32,
     continuous: f32,
-    // Keep Zig's buffer size in sync with Metal's 8-byte struct alignment.
-    abi_padding: f32,
+    zoom_phase: f32,
 };
 
 const vertex_source =
@@ -66,10 +65,62 @@ const vertex_source =
     \\
 ;
 
-const fragment_source =
+const reference_source = blk: {
+    @setEvalBranchQuota(2_000_000);
+    var source: []const u8 = "";
+    for (mandelbrot.reference) |orbit| {
+        for (orbit) |reference_point| {
+            source = source ++ std.fmt.comptimePrint(
+                "    float2({d}, {d}),\n",
+                .{ reference_point[0], reference_point[1] },
+            );
+        }
+    }
+    break :blk source;
+};
+const centre_source = blk: {
+    var source: []const u8 = "";
+    for (mandelbrot.centres) |centre| {
+        source = source ++ std.fmt.comptimePrint(
+            "    float2({d}, {d}),\n",
+            .{ centre[0], centre[1] },
+        );
+    }
+    break :blk source;
+};
+
+const fragment_source = std.fmt.comptimePrint(
     \\#include <metal_stdlib>
     \\using namespace metal;
+    \\constant int mandelbrot_iterations = {d};
+    \\constant int mandelbrot_region_count = {d};
+    \\constant float mandelbrot_escape_squared = {d};
+    \\constant float mandelbrot_depth_scale = {d};
+    \\constant float mandelbrot_start_extent = {d};
+    \\constant float mandelbrot_zoom_log_scale = {d};
+    \\constant float mandelbrot_transition_start = {d};
+    \\constant int mandelbrot_reference_count = {d};
+    \\constant float2 mandelbrot_centres[{d}] = {{
+    \\{s}
+    \\}};
+    \\constant float2 mandelbrot_reference[{d}] = {{
+    \\{s}
+    \\}};
     \\
+, .{
+    mandelbrot.iterations,
+    mandelbrot.centres.len,
+    mandelbrot.escape_squared,
+    mandelbrot.depth_scale,
+    mandelbrot.start_extent,
+    mandelbrot.zoom_log_scale,
+    mandelbrot.transition_start,
+    mandelbrot.reference[0].len,
+    mandelbrot.centres.len,
+    centre_source,
+    mandelbrot.reference.len * mandelbrot.reference[0].len,
+    reference_source,
+}) ++
     \\struct Uniforms {
     \\    float2 size;
     \\    float2 canvas;
@@ -88,7 +139,7 @@ const fragment_source =
     \\    float calm;
     \\    float fold_kind;
     \\    float continuous;
-    \\    float abi_padding;
+    \\    float zoom_phase;
     \\};
     \\
     \\struct VertexOut {
@@ -117,27 +168,84 @@ const fragment_source =
     \\    return strength;
     \\}
     \\
-    \\static float2 bend(float2 p, constant Uniforms &u) {
+    \\static float2 complex_multiply(float2 left, float2 right) {
+    \\    return float2(left.x * right.x - left.y * right.y,
+    \\                  left.x * right.y + left.y * right.x);
+    \\}
+    \\
+    \\static float2 mandelbrot_fallback(float2 q, float half_min) {
+    \\    float depth = float(mandelbrot_iterations) / mandelbrot_depth_scale;
+    \\    depth += length(q) / half_min * 0.25;
+    \\    return float2(depth, atan2(q.y, q.x));
+    \\}
+    \\
+    \\static float2 mandelbrot_branch(float2 q, float half_min, int region, float progress) {
+    \\    float2 point = q / half_min;
+    \\    float2 dc = point * mandelbrot_start_extent * exp(-progress * mandelbrot_zoom_log_scale);
+    \\    float2 c = mandelbrot_centres[region] + dc;
+    \\    float cardioid_x = c.x - 0.25;
+    \\    float cardioid_q = cardioid_x * cardioid_x + c.y * c.y;
+    \\    if (cardioid_q * (cardioid_q + cardioid_x) <= 0.25 * c.y * c.y) return mandelbrot_fallback(q, half_min);
+    \\    float bulb_x = c.x + 1.0;
+    \\    if (bulb_x * bulb_x + c.y * c.y <= 0.0625) return mandelbrot_fallback(q, half_min);
+    \\    int reference_base = region * mandelbrot_reference_count;
+    \\    float2 delta = float2(0.0);
+    \\    float2 z;
+    \\    for (int iteration = 0; iteration < mandelbrot_iterations; ++iteration) {
+    \\        float2 reference_point = mandelbrot_reference[reference_base + iteration];
+    \\        float2 linear = complex_multiply(2.0 * reference_point, delta);
+    \\        float2 quadratic = complex_multiply(delta, delta);
+    \\        float2 next_delta = linear + quadratic + dc;
+    \\        z = mandelbrot_reference[reference_base + iteration + 1] + next_delta;
+    \\        delta = next_delta;
+    \\        float magnitude_squared = dot(z, z);
+    \\        if (magnitude_squared <= mandelbrot_escape_squared) continue;
+    \\        float smooth = float(iteration + 2) - log2(log(magnitude_squared) * 0.5);
+    \\        float depth = smooth / mandelbrot_depth_scale;
+    \\        return float2(depth, atan2(z.y, z.x));
+    \\    }
+    \\    return mandelbrot_fallback(q, half_min);
+    \\}
+    \\
+    \\static float mandelbrot_travel_phase(constant Uniforms &u) {
+    \\    float travel_phase = fmod(u.zoom_phase, float(mandelbrot_region_count));
+    \\    if (travel_phase < 0.0) travel_phase += float(mandelbrot_region_count);
+    \\    return travel_phase;
+    \\}
+    \\
+    \\static float2 mandelbrot_coordinates(float2 q, float half_min, constant Uniforms &u, bool incoming) {
+    \\    float travel_phase = mandelbrot_travel_phase(u);
+    \\    int shot = int(floor(travel_phase));
+    \\    int region = shot % mandelbrot_region_count;
+    \\    float progress = travel_phase - float(shot);
+    \\    float camera_progress = smoothstep(0.0, mandelbrot_transition_start, progress);
+    \\    int next_region = (region + 1) % mandelbrot_region_count;
+    \\    int selected_region = incoming ? next_region : region;
+    \\    float selected_progress = incoming ? 0.0 : camera_progress;
+    \\    return mandelbrot_branch(q, half_min, selected_region, selected_progress);
+    \\}
+    \\
+    \\static float2 bend(float2 p, constant Uniforms &u, bool incoming) {
     \\    float strength = still_strength(p, u);
+    \\    if (strength <= 0.0) return p;
     \\    float2 centre = u.size * 0.5;
     \\    float2 q = p - centre;
     \\    float half_min = min(u.canvas.x, u.canvas.y) * 0.5;
     \\    float radius = length(q);
-    \\    float depth_radius = u.fold_kind > 1.5
-    \\        ? radius / half_min
-    \\        : log(radius / half_min + 0.01);
-    \\    float angle0 = atan2(q.y, q.x);
+    \\    float2 mapped = u.fold_kind > 2.5
+    \\        ? mandelbrot_coordinates(q, half_min, u, incoming)
+    \\        : float2(u.fold_kind > 1.5 ? radius / half_min : log(radius / half_min + 0.01), atan2(q.y, q.x));
     \\
-    \\    float depth = depth_radius * u.ring_count - u.rush_phase - u.heart * u.kick_push;
+    \\    float depth = mapped.x * u.ring_count - u.rush_phase - u.heart * u.kick_push;
     \\    float level = floor(depth);
     \\    float within = clamp(depth - level, 0.0, 1.0);
     \\    float eased = within * within * (3.0 - 2.0 * within);
     \\    float parity = fmod(level, 2.0);
     \\    if (parity < 0.0) parity += 2.0;
-    \\    float band = u.fold_kind > 1.5 && u.continuous < 0.5
+    \\    float band = u.fold_kind > 1.5 && u.fold_kind < 2.5 && u.continuous < 0.5
     \\        ? eased : (parity < 1.0 ? eased : 1.0 - eased);
     \\
-    \\    float turned_angle = angle0 + u.turn_phase * u.spin_rate + depth * u.ring_shift;
+    \\    float turned_angle = mapped.y + u.turn_phase * u.spin_rate + depth * u.ring_shift;
     \\    float angle = turned_angle;
     \\    if (u.mirrors > 1.0) {
     \\        float sector = 6.28318530718 / u.mirrors;
@@ -147,14 +255,14 @@ const fragment_source =
     \\    }
     \\
     \\    float lane_band = band;
-    \\    if (u.continuous < 0.5) {
+    \\    if (u.fold_kind <= 2.5 && u.continuous < 0.5) {
     \\        lane_band = fmod(band, 1.0);
     \\        if (lane_band < 0.0) lane_band += 1.0;
     \\    }
     \\    float reach = half_min * lane_band;
     \\    float2 local = float2(abs(cos(angle)) * reach, abs(sin(angle)) * reach);
     \\
-    \\    float turned = level * u.spin;
+    \\    float turned = (u.fold_kind > 2.5 ? depth : level) * u.spin;
     \\    float2 source = centre + float2(local.x * cos(turned) - local.y * sin(turned),
     \\                                    local.x * sin(turned) + local.y * cos(turned));
     \\    float2 wrapped = float2(bounced(source.x, u.size.x), bounced(source.y, u.size.y));
@@ -166,6 +274,15 @@ const fragment_source =
     \\                      texture2d<float> picture [[texture(0)]],
     \\                      sampler picked [[sampler(0)]]) {
     \\    float2 p = float2(in.uv.x * u.size.x, in.uv.y * u.size.y);
+    \\    if (u.fold_kind > 2.5) {
+    \\        float4 front = picture.sample(picked, bend(p, u, false) / u.size);
+    \\        float route_phase = mandelbrot_travel_phase(u);
+    \\        float progress = route_phase - floor(route_phase);
+    \\        float weight = smoothstep(mandelbrot_transition_start, 1.0, progress);
+    \\        if (weight <= 0.0) return front;
+    \\        float4 incoming = picture.sample(picked, bend(p, u, true) / u.size);
+    \\        return mix(front, incoming, weight);
+    \\    }
     \\
     \\    // The fold is evaluated per pixel, so a lane seam or a squeezed band
     \\    // inside one pixel is a hard step. Nine taps across the pixel average it,
@@ -174,7 +291,7 @@ const fragment_source =
     \\    for (int row = 0; row < 3; ++row) {
     \\        for (int column = 0; column < 3; ++column) {
     \\            float2 offset = float2(float(column) - 1.0, float(row) - 1.0) * (1.0 / 3.0);
-    \\            blended += picture.sample(picked, bend(p + offset, u) / u.size);
+    \\            blended += picture.sample(picked, bend(p + offset, u, false) / u.size);
     \\        }
     \\    }
     \\    return blended * (1.0 / 9.0);
@@ -270,7 +387,7 @@ pub const Painter = struct {
         size: dvui.Size.Physical,
         canvas: dvui.Size.Physical,
         stills: []const dvui.Rect.Physical,
-        lens: dmt.Lens,
+        lens: folding.Lens,
     ) Uniforms {
         var still_min: [3][2]f32 = @splat(.{ 0, 0 });
         var still_max: [3][2]f32 = @splat(.{ 0, 0 });
@@ -298,9 +415,10 @@ pub const Painter = struct {
             .fold_kind = switch (lens.fold) {
                 .tunnel => 1,
                 .rings => 2,
+                .mandelbrot => 3,
             },
             .continuous = if (lens.continuous) 1 else 0,
-            .abi_padding = 0,
+            .zoom_phase = lens.zoom_phase,
         };
     }
 };
