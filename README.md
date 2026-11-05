@@ -122,13 +122,20 @@ Keys are the names dvui uses: `a` to `z`, `zero` to `nine`, `escape`, `space`, `
 
 The `midi` menu above the panels maps a controller to the controls. Click a name, then move a knob, fader or pad: that control takes the target. `x` beside a name clears it; `unbound` means nothing drives it. The menu names the controller that last sent a message.
 
-Sliders follow the control across their whole track. Stages and wander ticks flip on a press: a value over 64 turns them over, and the release does nothing. Note-on and note-off work as well as control changes, so the pads on a Launch Control bind like the buttons they are.
+Sliders follow the control across their whole track. Stages, folds and wander ticks flip on a press: a value over 64 turns them over, and the release does nothing. Note-on and note-off work as well as control changes, so the pads on a Launch Control bind like the buttons they are.
+
+The column of pads beside a switch name is its mode. `latch` is right for a pad set to Momentary: the press flips it. `toggle` is right for a pad set to Toggle in Novation Components, which sends 127 and then 0 on the same control; each message is a press, so one push flips once.
+
+Each fold has its own row, so `tunnel`, `rings` and `mandelbrot` can each sit under a pad; pressing one selects it.
+
+Bindings drive the controller's lights back: a switch's control is lit while it is on, including when the mouse changed it, and each fold's pad is lit while that fold is selected. Feedback goes to the destination whose name matches the source that is sending. A pad set to Toggle will also flip its own light, so set those pads to Momentary if the light should follow the app.
 
 Bindings live in `$XDG_CONFIG_HOME/alchiviz/midi.conf`, or `~/.config/alchiviz/midi.conf` when `XDG_CONFIG_HOME` is unset. The app writes the file when a binding changes; it can also be edited by hand.
 
 ```
 #   cc 5 = speed              a control change drives a slider
 #   note 41 = stage fold      a pad flips a switch
+#   note 50 = law rings       a pad picks one of the folds
 #   ch 8 cc 5 = blur          "ch" pins the channel, 0 to 15; omit it for any
 #   cc 20 = speed             two lines on one control are a macro: that
 #   cc 20 = blur              control then moves both targets
