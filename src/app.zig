@@ -66,6 +66,10 @@ pub const GpuFrame = struct {
     swapchain: ?*anyopaque = null,
 };
 
+/// How long after a press the lights are written again. The controller paints
+/// its own colour on the press, so an earlier write would be overwritten.
+pub const lights_settle_ms: i64 = 120;
+
 pub const App = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -123,6 +127,10 @@ pub const App = struct {
     midi_last: ?midi.Message = null,
     /// Why the last bind or write failed; the menu shows it until one works.
     midi_status: ?[]const u8 = null,
+    /// When the lights are written again after a press, so the state's colour
+    /// outlasts the controller's own repaint of the pad. Zero when nothing is
+    /// pending.
+    lights_due_ms: i64 = 0,
     /// Where the keybinds and the midi table live, borrowed from the process.
     environ: *const std.process.Environ.Map,
     /// The panels' rects once drawn, so the fold leaves them flat and they can
@@ -816,8 +824,17 @@ pub const App = struct {
                 continue;
             }
             _ = midi.apply(&self.midi_bindings, message, self.midiSink(), @intCast(@divTrunc(std.Io.Clock.awake.now(self.io).nanoseconds, std.time.ns_per_ms)));
+            // The controller repaints a pad's own light when it is pressed, so
+            // the state's colour is written again once the press has settled.
+            self.lights_due_ms = @intCast(@divTrunc(std.Io.Clock.awake.now(self.io).nanoseconds, std.time.ns_per_ms) + lights_settle_ms);
         }
-        self.syncLights(input);
+        self.syncLights(input, false);
+
+        const now_ms: i64 = @intCast(@divTrunc(std.Io.Clock.awake.now(self.io).nanoseconds, std.time.ns_per_ms));
+        if (self.lights_due_ms != 0 and now_ms >= self.lights_due_ms) {
+            self.lights_due_ms = 0;
+            self.syncLights(input, true);
+        }
     }
 
     fn midiSink(self: *App) midi.Sink {
@@ -832,11 +849,11 @@ pub const App = struct {
 
     /// Light a switch's control the way the panel shows it, including changes
     /// made with the mouse, and send only what moved.
-    fn syncLights(self: *App, input: *midi.Input) void {
+    fn syncLights(self: *App, input: *midi.Input, everywhere: bool) void {
         const sink = self.midiSink();
         for (self.midi_bindings.list.items) |*binding| {
             const colour = midi.colourOf(binding.*, sink) orelse continue;
-            if (binding.lit == colour) continue;
+            if (!everywhere and binding.lit == colour) continue;
             // Only a light that reached the controller is remembered; before a
             // destination is known the next frame tries again.
             if (input.send(binding.signature, colour)) binding.lit = colour;
