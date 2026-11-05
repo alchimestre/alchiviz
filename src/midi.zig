@@ -126,6 +126,22 @@ pub const Mode = enum {
     toggle,
 };
 
+/// What a control's light shows. Off is dark; the two lit colours separate the
+/// row of stage pads from the row of wander pads.
+pub const Colour = enum {
+    off,
+    green,
+    blue,
+
+    fn rgb(self: Colour) [3]u8 {
+        return switch (self) {
+            .off => .{ 0, 0, 0 },
+            .green => .{ 0, 200, 40 },
+            .blue => .{ 0, 60, 255 },
+        };
+    }
+};
+
 /// How long a control must stay quiet for the next message to count as a new
 /// press. A momentary pad's press and release arrive within a few frames; two
 /// presses of the same pad never do.
@@ -147,7 +163,7 @@ pub const Binding = struct {
     last_ms: i64 = std.math.minInt(i64),
     /// What the controller's light last showed for this binding, so feedback
     /// goes out only when it changes. Not part of the config file.
-    lit: ?bool = null,
+    lit: ?Colour = null,
 };
 
 pub const Bindings = struct {
@@ -262,7 +278,8 @@ pub fn apply(bindings: *Bindings, message: Message, sink: Sink, now_ms: i64) boo
         const on = switch (binding.mode) {
             .absolute => message.value >= 64,
             .latch => blk: {
-                const pressed = now_ms - binding.last_ms >= press_gap_ms;
+                // Saturating, because a fresh binding has no earlier stamp.
+                const pressed = now_ms -| binding.last_ms >= press_gap_ms;
                 binding.last = message.value;
                 binding.last_ms = now_ms;
                 if (!pressed) continue;
@@ -306,10 +323,17 @@ fn switched(target: Target, sink: Sink) bool {
 
 /// What the controller's light should show for a binding, or null when the
 /// target is a slider with no light of its own.
-pub fn lightOf(binding: Binding, sink: Sink) ?bool {
-    return switch (binding.target) {
-        .knob, .intensity => null,
+/// The light a binding's control should show, or null for a control that has
+/// no state to show.
+pub fn colourOf(binding: Binding, sink: Sink) ?Colour {
+    const on = switch (binding.target) {
+        .knob, .intensity => return null,
         else => switched(binding.target, sink),
+    };
+    if (!on) return .off;
+    return switch (binding.target) {
+        .wander => .blue,
+        else => .green,
     };
 }
 
@@ -493,18 +517,21 @@ pub const Input = struct {
     /// a note, so the message mirrors what the control sends. Returns false
     /// when there is nothing to send it to, so the caller does not remember a
     /// light it never set.
-    pub fn send(self: *Input, signature: Signature, on: bool) bool {
+    pub fn send(self: *Input, signature: Signature, colour: Colour) bool {
         if (!self.started or self.output == 0) return false;
         self.resolveDestination();
         if (self.destination == 0) return false;
 
-        const value: u7 = if (on) 127 else 0;
-        const channel = signature.channel orelse 0;
-        const status: u8 = switch (signature.kind) {
-            .cc => 0xB0,
-            .note => 0x90 | @as(u8, channel),
-        };
-        return c.alchiviz_midi_send3(self.output, self.destination, status, signature.control, value) == 0;
+        if (colour == .off) {
+            const channel = signature.channel orelse 0;
+            const status: u8 = switch (signature.kind) {
+                .cc => 0xB0,
+                .note => 0x90 | @as(u8, channel),
+            };
+            return c.alchiviz_midi_send3(self.output, self.destination, status, signature.control, 0) == 0;
+        }
+        const rgb = colour.rgb();
+        return c.alchiviz_midi_send_rgb(self.output, self.destination, signature.control, rgb[0], rgb[1], rgb[2]) == 0;
     }
 
     /// Feedback goes to the destination that shares the longest name prefix
@@ -739,16 +766,27 @@ test "a latch flips once per press and ignores the release" {
 
     const pressed: Message = .{ .kind = .note, .channel = 0, .control = 41, .value = 127 };
     const released: Message = .{ .kind = .note, .channel = 0, .control = 41, .value = 0 };
-    try std.testing.expect(toggles.mirrors);
-    // A momentary pad's press and release are one click, seconds apart from the
-    // next one.
-    _ = apply(&bindings, pressed, sink, 0);
+    // A binding that has never seen a message has no earlier stamp to compare
+    // against, so its first message counts as a press.
+    const first_ms: i64 = 1_700_000_000_000;
+    try std.testing.expectEqual(std.math.minInt(i64), bindings.list.items[0].last_ms);
+    try std.testing.expect(apply(&bindings, pressed, sink, first_ms));
     try std.testing.expect(!toggles.mirrors);
-    _ = apply(&bindings, released, sink, 40);
+    // The release belongs to the same click.
+    _ = apply(&bindings, released, sink, first_ms + 40);
     try std.testing.expect(!toggles.mirrors);
-    _ = apply(&bindings, pressed, sink, 2000);
+    _ = apply(&bindings, pressed, sink, first_ms + 2000);
     try std.testing.expect(toggles.mirrors);
-    _ = apply(&bindings, released, sink, 2040);
+    _ = apply(&bindings, released, sink, first_ms + 2040);
+    try std.testing.expect(toggles.mirrors);
+
+    // The gap is what separates presses: a message inside it is a release and
+    // one after it opens a new press.
+    try std.testing.expect(apply(&bindings, pressed, sink, first_ms + 4000));
+    try std.testing.expect(!toggles.mirrors);
+    try std.testing.expect(!apply(&bindings, released, sink, first_ms + 4100));
+    try std.testing.expect(!toggles.mirrors);
+    try std.testing.expect(apply(&bindings, pressed, sink, first_ms + 4400));
     try std.testing.expect(toggles.mirrors);
 }
 
@@ -832,8 +870,8 @@ test "each fold picks its law from its own pad" {
     // A selected fold is lit; the pads for the others are dark.
     const tunnel = bindings.forTarget(.{ .law = .tunnel }).?;
     const rings = bindings.forTarget(.{ .law = .rings }).?;
-    try std.testing.expectEqual(true, lightOf(tunnel.*, sink).?);
-    try std.testing.expectEqual(false, lightOf(rings.*, sink).?);
+    try std.testing.expectEqual(Colour.green, colourOf(tunnel.*, sink).?);
+    try std.testing.expectEqual(Colour.off, colourOf(rings.*, sink).?);
 }
 
 test "a slider has no light to drive" {
@@ -849,14 +887,16 @@ test "a slider has no light to drive" {
         .target = .{ .knob = .speed },
         .mode = .absolute,
     };
-    try std.testing.expect(lightOf(binding, sink) == null);
+    try std.testing.expect(colourOf(binding, sink) == null);
 
     const tick: Binding = .{
         .signature = .{ .kind = .cc, .channel = null, .control = 6 },
         .target = .{ .wander = .speed },
         .mode = .latch,
     };
-    try std.testing.expectEqual(false, lightOf(tick, sink).?);
+    try std.testing.expectEqual(Colour.off, colourOf(tick, sink).?);
+    wandering.insert(.speed);
+    try std.testing.expectEqual(Colour.blue, colourOf(tick, sink).?);
 }
 
 test "a fold pad and a toggle mode survive the file" {

@@ -88,4 +88,17 @@ static inline OSStatus alchiviz_midi_send3(MIDIPortRef port, MIDIEndpointRef des
     list->packet[0].data[2] = data2;
     return MIDISend(port, destination, list);
 }
+
+// One button's light in exact RGB, the SysEx form the guide documents for
+// custom colours. Thirteen bytes: header, command, control index, RGB, end.
+static inline OSStatus alchiviz_midi_send_rgb(MIDIPortRef port, MIDIEndpointRef destination, uint8_t control, uint8_t red, uint8_t green, uint8_t blue) {
+    uint8_t buffer[sizeof(uint32_t) + offsetof(MIDIPacket, data) + 13] __attribute__((aligned(4)));
+    MIDIPacketList *list = (MIDIPacketList *)buffer;
+    list->numPackets = 1;
+    list->packet[0].timeStamp = 0;
+    list->packet[0].length = 13;
+    const uint8_t message[13] = { 0xF0, 0x00, 0x20, 0x29, 0x02, 0x15, 0x01, 0x53, control, red, green, blue, 0xF7 };
+    for (int i = 0; i < 13; i++) list->packet[0].data[i] = message[i];
+    return MIDISend(port, destination, list);
+}
 #endif

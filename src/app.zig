@@ -835,11 +835,11 @@ pub const App = struct {
     fn syncLights(self: *App, input: *midi.Input) void {
         const sink = self.midiSink();
         for (self.midi_bindings.list.items) |*binding| {
-            const lit = midi.lightOf(binding.*, sink) orelse continue;
-            if (binding.lit == lit) continue;
+            const colour = midi.colourOf(binding.*, sink) orelse continue;
+            if (binding.lit == colour) continue;
             // Only a light that reached the controller is remembered; before a
             // destination is known the next frame tries again.
-            if (input.send(binding.signature, lit)) binding.lit = lit;
+            if (input.send(binding.signature, colour)) binding.lit = colour;
         }
     }
 
