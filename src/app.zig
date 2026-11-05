@@ -200,6 +200,9 @@ pub const App = struct {
             break :blk null;
         };
         app.midi_bindings = midi.load(allocator, environ, io);
+        if (app.midi_bindings.lightsName()) |name| {
+            if (app.controller) |input| input.preferDestination(name);
+        }
 
         // A backdrop that will not load leaves the frame as it was, with the
         // reason on screen and in the log instead of nowhere.
@@ -808,7 +811,10 @@ pub const App = struct {
     /// Drain the controller and write into the same values the mouse writes.
     fn pollMidi(self: *App) void {
         const input = self.controller orelse return;
+        const now_ms: i64 = @intCast(@divTrunc(std.Io.Clock.awake.now(self.io).nanoseconds, std.time.ns_per_ms));
         while (input.next()) |message| {
+            // A light carries the same bytes as a press; its echo is not one.
+            if (input.isEcho(message, now_ms)) continue;
             self.midi_last = message;
             if (self.midi_learn) |target| {
                 self.midi_learn = null;
@@ -829,8 +835,12 @@ pub const App = struct {
             self.lights_due_ms = @intCast(@divTrunc(std.Io.Clock.awake.now(self.io).nanoseconds, std.time.ns_per_ms) + lights_settle_ms);
         }
         self.syncLights(input, false);
+        // Remember the device the lights reached, so the next run starts on it
+        // instead of on whichever controller happens to share a longer prefix.
+        if (input.destinationName()) |name| {
+            if (self.midi_bindings.setLightsName(name)) self.saveBindings();
+        }
 
-        const now_ms: i64 = @intCast(@divTrunc(std.Io.Clock.awake.now(self.io).nanoseconds, std.time.ns_per_ms));
         if (self.lights_due_ms != 0 and now_ms >= self.lights_due_ms) {
             self.lights_due_ms = 0;
             self.syncLights(input, true);
@@ -856,7 +866,8 @@ pub const App = struct {
             if (!everywhere and binding.lit == colour) continue;
             // Only a light that reached the controller is remembered; before a
             // destination is known the next frame tries again.
-            if (input.send(binding.signature, colour)) binding.lit = colour;
+            const now_ms: i64 = @intCast(@divTrunc(std.Io.Clock.awake.now(self.io).nanoseconds, std.time.ns_per_ms));
+            if (input.send(binding.signature, colour, now_ms)) binding.lit = colour;
         }
     }
 

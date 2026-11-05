@@ -128,16 +128,17 @@ pub const Mode = enum {
 
 /// What a control's light shows. Off is dark; the two lit colours separate the
 /// row of stage pads from the row of wander pads.
+/// A pad takes two lights: its own colour from the Custom Mode, and white.
 pub const Colour = enum {
     off,
-    green,
-    blue,
+    lit,
 
-    fn rgb(self: Colour) [3]u8 {
+    /// 127 is white and anything else leaves the pad's own colour, so the row
+    /// colour still comes from the mode's settings.
+    fn value(self: Colour) u7 {
         return switch (self) {
-            .off => .{ 0, 0, 0 },
-            .green => .{ 0, 200, 40 },
-            .blue => .{ 0, 60, 255 },
+            .off => 127,
+            .lit => 0,
         };
     }
 };
@@ -166,8 +167,33 @@ pub const Binding = struct {
     lit: ?Colour = null,
 };
 
+const Recent = struct { control: u8 = 0, value: u7 = 0, at_ms: i64 = 0 };
+
+/// How long a light can echo back. The controller repeats it at once, so the
+/// window only has to cover the round trip.
+pub const echo_window_ms: i64 = 80;
+
 pub const Bindings = struct {
     list: std.ArrayListUnmanaged(Binding) = .empty,
+    /// The controller the lights belong to, so the first frame of the next run
+    /// already writes to it. Empty until the controller has spoken once.
+    lights_name: [96]u8 = @splat(0),
+    lights_len: usize = 0,
+
+    pub fn lightsName(self: *const Bindings) ?[]const u8 {
+        if (self.lights_len == 0) return null;
+        return self.lights_name[0..self.lights_len];
+    }
+
+    pub fn setLightsName(self: *Bindings, name: []const u8) bool {
+        if (name.len == 0 or name.len > self.lights_name.len) return false;
+        if (self.lightsName()) |current| {
+            if (std.mem.eql(u8, current, name)) return false;
+        }
+        @memcpy(self.lights_name[0..name.len], name);
+        self.lights_len = name.len;
+        return true;
+    }
 
     pub fn deinit(self: *Bindings, allocator: std.mem.Allocator) void {
         self.list.deinit(allocator);
@@ -228,6 +254,11 @@ pub const Bindings = struct {
         var out: std.ArrayListUnmanaged(u8) = .empty;
         errdefer out.deinit(allocator);
         try out.appendSlice(allocator, header);
+        if (self.lightsName()) |name| {
+            var line: [128]u8 = undefined;
+            const written = std.fmt.bufPrint(&line, "lights {s}\n", .{name}) catch "";
+            try out.appendSlice(allocator, written);
+        }
         for (self.list.items) |binding| {
             var line: [160]u8 = undefined;
             var key_buffer: [32]u8 = undefined;
@@ -330,11 +361,7 @@ pub fn colourOf(binding: Binding, sink: Sink) ?Colour {
         .knob, .intensity => return null,
         else => switched(binding.target, sink),
     };
-    if (!on) return .off;
-    return switch (binding.target) {
-        .wander => .blue,
-        else => .green,
-    };
+    return if (on) .lit else .off;
 }
 
 /// `[ch <n>] (cc|note) <n> = <target> [absolute|latch|toggle]`
@@ -399,6 +426,10 @@ pub fn load(allocator: std.mem.Allocator, environ: *const std.process.Environ.Ma
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0 or line[0] == '#') continue;
+        if (std.mem.startsWith(u8, line, "lights ")) {
+            _ = bindings.setLightsName(std.mem.trim(u8, line["lights ".len..], " \t"));
+            continue;
+        }
         const binding = parseLine(line) orelse continue;
         bindings.put(allocator, binding) catch return bindings;
     }
@@ -444,7 +475,20 @@ pub const Input = struct {
     destination: c.MIDIEndpointRef = 0,
     destination_name: [96]u8 = undefined,
     destination_len: usize = 0,
-    sources: usize = 0,
+    /// The sources the port listens to. The lights take their destination from
+    /// these, so they are set before any message has arrived.
+    source_refs: [32]c.MIDIEndpointRef = @splat(0),
+    source_count: usize = 0,
+    /// The destination named in the config. Another controller's pair can share
+    /// a longer prefix than the bound one, so the name that worked last time
+    /// wins until the controller speaks.
+    wanted_name: [96]u8 = @splat(0),
+    wanted_len: usize = 0,
+    /// The lights just written. The controller mirrors them into its own input,
+    /// and a colour carries the same bytes as a press, so they are told apart by
+    /// what was sent.
+    recent: [32]Recent = @splat(.{}),
+    recent_next: usize = 0,
     queue: Queue = .{},
     /// The source that last sent, so the menu names the controller in use
     /// rather than whichever endpoint came first.
@@ -484,7 +528,10 @@ pub const Input = struct {
             if (source == 0) continue;
             // The endpoint comes back on every packet, so the menu can name
             // the controller that is actually moving.
-            if (c.MIDIPortConnectSource(self.port, source, @ptrFromInt(@as(usize, source))) == 0) self.sources += 1;
+            if (c.MIDIPortConnectSource(self.port, source, @ptrFromInt(@as(usize, source))) != 0) continue;
+            if (self.source_count == self.source_refs.len) continue;
+            self.source_refs[self.source_count] = source;
+            self.source_count += 1;
         }
         self.started = true;
     }
@@ -498,7 +545,7 @@ pub const Input = struct {
             self.output = 0;
             self.destination = 0;
             self.client = 0;
-            self.sources = 0;
+            self.source_count = 0;
             self.started = false;
         }
         allocator.destroy(self);
@@ -508,8 +555,55 @@ pub const Input = struct {
     /// queue's sender is copied out here, because only this thread reads it.
     pub fn next(self: *Input) ?Message {
         const message = self.queue.pop();
-        if (message != null) self.origin.store(self.queue.origin.load(.acquire), .release);
+        if (message != null) {
+            const origin = self.queue.origin.load(.acquire);
+            // A different device is playing: its pair takes the lights.
+            if (origin != self.origin.load(.acquire)) self.destination = 0;
+            self.origin.store(origin, .release);
+        }
         return message;
+    }
+
+    fn noteSent(self: *Input, control: u8, value: u7, now_ms: i64) void {
+        self.recent[self.recent_next] = .{ .control = control, .value = value, .at_ms = now_ms };
+        self.recent_next = (self.recent_next + 1) % self.recent.len;
+    }
+
+    /// Whether a message is the controller repeating a light this app wrote.
+    pub fn isEcho(self: *const Input, message: Message, now_ms: i64) bool {
+        const value = message.value;
+        for (self.recent) |recent| {
+            if (recent.at_ms == 0) continue;
+            if (now_ms -% recent.at_ms > echo_window_ms) continue;
+            if (recent.control != message.control) continue;
+            if (recent.value != value) continue;
+            return true;
+        }
+        return false;
+    }
+
+    /// Name the destination to use before the controller has spoken.
+    pub fn preferDestination(self: *Input, name: []const u8) void {
+        if (name.len == 0 or name.len > self.wanted_name.len) return;
+        if (self.wanted_len == name.len and std.mem.eql(u8, self.wanted_name[0..self.wanted_len], name)) return;
+        @memcpy(self.wanted_name[0..name.len], name);
+        self.wanted_len = name.len;
+        self.destination = 0;
+    }
+
+    fn namedDestination(self: *Input) c.MIDIEndpointRef {
+        if (self.wanted_len == 0) return 0;
+        const wanted = self.wanted_name[0..self.wanted_len];
+        const count = c.MIDIGetNumberOfDestinations();
+        var index: usize = 0;
+        while (index < count) : (index += 1) {
+            const candidate = c.MIDIGetDestination(index);
+            if (candidate == 0) continue;
+            var name_buffer: [96]u8 = undefined;
+            const name = name_buffer[0 .. displayName(candidate, &name_buffer) orelse continue];
+            if (std.mem.eql(u8, name, wanted)) return candidate;
+        }
+        return 0;
     }
 
     /// Set one control's light. The Launch Control colours a control from a
@@ -517,36 +611,61 @@ pub const Input = struct {
     /// a note, so the message mirrors what the control sends. Returns false
     /// when there is nothing to send it to, so the caller does not remember a
     /// light it never set.
-    pub fn send(self: *Input, signature: Signature, colour: Colour) bool {
+    pub fn send(self: *Input, signature: Signature, colour: Colour, now_ms: i64) bool {
         if (!self.started or self.output == 0) return false;
         self.resolveDestination();
         if (self.destination == 0) return false;
 
-        if (colour == .off) {
-            const channel = signature.channel orelse 0;
-            const status: u8 = switch (signature.kind) {
-                .cc => 0xB0,
-                .note => 0x90 | @as(u8, channel),
-            };
-            return c.alchiviz_midi_send3(self.output, self.destination, status, signature.control, 0) == 0;
-        }
-        const rgb = colour.rgb();
-        return c.alchiviz_midi_send_rgb(self.output, self.destination, signature.control, rgb[0], rgb[1], rgb[2]) == 0;
+        const channel = signature.channel orelse 0;
+        const status: u8 = switch (signature.kind) {
+            .cc => 0xB0,
+            .note => 0x90 | @as(u8, channel),
+        };
+        const value = colour.value();
+        const sent = c.alchiviz_midi_send3(self.output, self.destination, status, signature.control, value) == 0;
+        if (sent) self.noteSent(signature.control, value, now_ms);
+        return sent;
     }
 
     /// Feedback goes to the destination that shares the longest name prefix
-    /// with the source that is sending, so two controllers do not talk over
-    /// each other's lights.
+    /// with one of the controller's sources, so two controllers do not talk
+    /// over each other's lights. The sources are known as soon as the port is
+    /// open, so the lights are set before anything is played.
     fn resolveDestination(self: *Input) void {
         if (self.destination != 0) return;
-        const origin = self.origin.load(.acquire);
-        if (origin == 0) return;
 
-        var origin_buffer: [96]u8 = undefined;
-        const origin_name = origin_buffer[0 .. displayName(origin, &origin_buffer) orelse return];
+        const named = self.namedDestination();
+        if (named != 0) {
+            self.destination = named;
+            self.destination_len = self.wanted_len;
+            @memcpy(self.destination_name[0..self.wanted_len], self.wanted_name[0..self.wanted_len]);
+            return;
+        }
+
+        var origin_buffers: [32][96]u8 = undefined;
+        var origin_names: [32][]const u8 = undefined;
+        var origin_count: usize = 0;
+
+        const origin = self.origin.load(.acquire);
+        if (origin != 0) {
+            if (displayName(origin, &origin_buffers[0])) |length| {
+                origin_names[0] = origin_buffers[0][0..length];
+                origin_count = 1;
+            }
+        }
+        if (origin_count == 0) {
+            for (self.source_refs[0..self.source_count]) |source| {
+                if (origin_count == origin_names.len) break;
+                if (displayName(source, &origin_buffers[origin_count])) |length| {
+                    origin_names[origin_count] = origin_buffers[origin_count][0..length];
+                    origin_count += 1;
+                }
+            }
+        }
+        if (origin_count == 0) return;
 
         var best: c.MIDIEndpointRef = 0;
-        var best_shared: usize = 4;
+        var best_shared: usize = 7;
         var best_name: [96]u8 = undefined;
         var best_name_len: usize = 0;
         const count = c.MIDIGetNumberOfDestinations();
@@ -556,12 +675,14 @@ pub const Input = struct {
             if (candidate == 0) continue;
             var name_buffer: [96]u8 = undefined;
             const name = name_buffer[0 .. displayName(candidate, &name_buffer) orelse continue];
-            const shared = commonPrefix(origin_name, name);
-            if (shared > best_shared) {
-                best_shared = shared;
-                best = candidate;
-                best_name_len = name.len;
-                @memcpy(best_name[0..name.len], name);
+            for (origin_names[0..origin_count]) |origin_name| {
+                const shared = commonPrefix(origin_name, name);
+                if (shared > best_shared) {
+                    best_shared = shared;
+                    best = candidate;
+                    best_name_len = name.len;
+                    @memcpy(best_name[0..name.len], name);
+                }
             }
         }
         self.destination = best;
@@ -586,7 +707,7 @@ pub const Input = struct {
             }
         }
         if (self.name_len > 0) return self.name[0..self.name_len];
-        if (self.sources == 0) return "no controller";
+        if (self.source_count == 0) return "no controller";
         return "waiting for a message";
     }
 
@@ -870,7 +991,7 @@ test "each fold picks its law from its own pad" {
     // A selected fold is lit; the pads for the others are dark.
     const tunnel = bindings.forTarget(.{ .law = .tunnel }).?;
     const rings = bindings.forTarget(.{ .law = .rings }).?;
-    try std.testing.expectEqual(Colour.green, colourOf(tunnel.*, sink).?);
+    try std.testing.expectEqual(Colour.lit, colourOf(tunnel.*, sink).?);
     try std.testing.expectEqual(Colour.off, colourOf(rings.*, sink).?);
 }
 
@@ -896,7 +1017,7 @@ test "a slider has no light to drive" {
     };
     try std.testing.expectEqual(Colour.off, colourOf(tick, sink).?);
     wandering.insert(.speed);
-    try std.testing.expectEqual(Colour.blue, colourOf(tick, sink).?);
+    try std.testing.expectEqual(Colour.lit, colourOf(tick, sink).?);
 }
 
 test "a fold pad and a toggle mode survive the file" {
@@ -913,8 +1034,8 @@ test "a fold pad and a toggle mode survive the file" {
 }
 
 test "a destination pairs with the source of the same device" {
-    try std.testing.expect(commonPrefix("LCXL3 1 MIDI Out", "LCXL3 1 MIDI In") > 4);
-    try std.testing.expect(commonPrefix("LCXL3 1 MIDI Out", "Traktor Z1 MK2") < 4);
+    try std.testing.expect(commonPrefix("LCXL3 1 MIDI Out", "LCXL3 1 MIDI In") > 7);
+    try std.testing.expect(commonPrefix("LCXL3 1 MIDI Out", "Traktor Z1 MK2") < 7);
 }
 
 test "two bindings on one control move both targets" {
