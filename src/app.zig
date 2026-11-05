@@ -119,6 +119,8 @@ pub const App = struct {
     /// True while the panel is out of the way; the bind that flips it comes
     /// from the keys file.
     ui_hidden: bool = false,
+    fullscreen: bool = false,
+    commands: midi.Commands = .init(.{}),
     binds: keys.Binds = .{},
     /// The controller port, its bindings and the target waiting for a control.
     controller: ?*midi.Input = null,
@@ -725,6 +727,7 @@ pub const App = struct {
         self.midiColumn("stages", &midi.stages_list, 580);
         self.midiColumn("wander ticks", &midi.wander_ticks, 640);
         self.midiColumn("folds", &midi.laws, 700);
+        self.midiColumn("actions", &midi.commands_list, 760);
     }
 
     fn midiColumn(self: *App, title: []const u8, targets: []const midi.Target, id: u32) void {
@@ -845,6 +848,18 @@ pub const App = struct {
             self.lights_due_ms = 0;
             self.syncLights(input, true);
         }
+        self.runCommands();
+    }
+
+    /// Fire the actions a pad asked for. A command has no state of its own,
+    /// so it flips whatever it points at.
+    fn runCommands(self: *App) void {
+        defer self.commands = .init(.{});
+        if (self.commands.contains(.ui)) self.ui_hidden = !self.ui_hidden;
+        if (self.commands.contains(.fullscreen)) {
+            self.fullscreen = !self.fullscreen;
+            dvui.currentWindow().stateSet(if (self.fullscreen) .fullscreen else .normal);
+        }
     }
 
     fn midiSink(self: *App) midi.Sink {
@@ -854,6 +869,7 @@ pub const App = struct {
             .wandering = &self.wandering.enabled,
             .toggles = &self.toggles,
             .law = &self.fold_kind,
+            .commands = &self.commands,
         };
     }
 
