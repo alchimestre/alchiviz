@@ -38,10 +38,14 @@ typedef const void *CFStringRef;
 extern OSStatus MIDIClientCreate(CFStringRef name, void *notifyProc, void *notifyRefCon, MIDIClientRef *outClient);
 extern OSStatus MIDIClientDispose(MIDIClientRef client);
 extern OSStatus MIDIInputPortCreate(MIDIClientRef client, CFStringRef portName, MIDIReadProc readProc, void *refCon, MIDIPortRef *outPort);
+extern OSStatus MIDIOutputPortCreate(MIDIClientRef client, CFStringRef portName, MIDIPortRef *outPort);
+extern OSStatus MIDISend(MIDIPortRef port, MIDIEndpointRef dest, const MIDIPacketList *pktlist);
 extern OSStatus MIDIPortConnectSource(MIDIPortRef port, MIDIEndpointRef source, void *connRefCon);
 extern OSStatus MIDIPortDispose(MIDIPortRef port);
 extern ItemCount MIDIGetNumberOfSources(void);
 extern MIDIEndpointRef MIDIGetSource(ItemCount index);
+extern ItemCount MIDIGetNumberOfDestinations(void);
+extern MIDIEndpointRef MIDIGetDestination(ItemCount index);
 extern OSStatus MIDIObjectGetStringProperty(MIDIObjectRef object, CFStringRef property, CFStringRef *str);
 extern int CFStringGetCString(CFStringRef str, char *buffer, long capacity, uint32_t encoding);
 extern CFStringRef CFStringCreateWithCString(const void *alloc, const char *cStr, uint32_t encoding);
@@ -68,5 +72,20 @@ static inline const uint8_t *alchiviz_midi_packet_bytes(const MIDIPacket *packet
 
 static inline uint16_t alchiviz_midi_packet_length(const MIDIPacket *packet) {
     return packet->length;
+}
+
+// One three-byte message. The buffer is sized for exactly one packet, so the
+// list is built by hand rather than through MIDIPacketListAdd.
+static inline OSStatus alchiviz_midi_send3(MIDIPortRef port, MIDIEndpointRef destination, uint8_t status, uint8_t data1, uint8_t data2) {
+    // numPackets, then the first packet up to its bytes, then three bytes.
+    uint8_t buffer[sizeof(uint32_t) + offsetof(MIDIPacket, data) + 3] __attribute__((aligned(4)));
+    MIDIPacketList *list = (MIDIPacketList *)buffer;
+    list->numPackets = 1;
+    list->packet[0].timeStamp = 0;
+    list->packet[0].length = 3;
+    list->packet[0].data[0] = status;
+    list->packet[0].data[1] = data1;
+    list->packet[0].data[2] = data2;
+    return MIDISend(port, destination, list);
 }
 #endif

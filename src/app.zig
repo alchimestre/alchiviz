@@ -665,6 +665,16 @@ pub const App = struct {
             .id_extra = 511,
         });
 
+        if (self.controller) |input| {
+            if (input.destinationName()) |name| {
+                dvui.label(@src(), "lights: {s}", .{name}, .{
+                    .font = .theme(.body),
+                    .color_text = .{ .color = muted },
+                    .id_extra = 516,
+                });
+            }
+        }
+
         if (self.midi_status) |status| {
             dvui.labelNoFmt(@src(), status, .{}, .{
                 .font = .theme(.body),
@@ -703,6 +713,7 @@ pub const App = struct {
         self.midiColumn("sliders", &midi.sliders, 520);
         self.midiColumn("stages", &midi.stages_list, 580);
         self.midiColumn("wander ticks", &midi.wander_ticks, 640);
+        self.midiColumn("folds", &midi.laws, 700);
     }
 
     fn midiColumn(self: *App, title: []const u8, targets: []const midi.Target, id: u32) void {
@@ -718,7 +729,7 @@ pub const App = struct {
             .id_extra = id + 1,
         });
         for (targets, 0..) |target, index| {
-            self.midiRow(target, id + 4 + @as(u32, @intCast(index)) * 4);
+            self.midiRow(target, id + 4 + @as(u32, @intCast(index)) * 6);
         }
     }
 
@@ -726,7 +737,7 @@ pub const App = struct {
     fn midiRow(self: *App, target: midi.Target, id: u32) void {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .id_extra = id,
-            .min_size_content = .{ .w = 200, .h = 18 },
+            .min_size_content = .{ .w = 240, .h = 18 },
         });
         defer row.deinit();
 
@@ -756,13 +767,30 @@ pub const App = struct {
             .gravity_y = 0.5,
             .id_extra = id + 2,
         });
+        if (!target.continuous()) {
+            // A pad set to Toggle sends 127 and 0 on presses, so its release
+            // must count as a press; a momentary pad must not.
+            if (dvui.button(@src(), @tagName(binding.mode), .{}, .{
+                .font = .theme(.body),
+                .color_text = .{ .color = muted },
+                .gravity_y = 0.5,
+                .min_size_content = .{ .w = 40, .h = 14 },
+                .padding = dvui.Rect.all(1),
+                .id_extra = id + 3,
+            })) {
+                if (self.midi_bindings.forTargetMut(target)) |mapped| {
+                    mapped.mode = if (mapped.mode == .toggle) .latch else .toggle;
+                }
+                self.saveBindings();
+            }
+        }
         if (dvui.button(@src(), "x", .{}, .{
             .font = .theme(.body),
             .color_text = .{ .color = muted },
             .gravity_y = 0.5,
             .min_size_content = .{ .w = 14, .h = 14 },
             .padding = dvui.Rect.all(1),
-            .id_extra = id + 3,
+            .id_extra = id + 4,
         })) {
             self.midi_bindings.removeTarget(target);
             self.saveBindings();
@@ -787,12 +815,31 @@ pub const App = struct {
                 self.saveBindings();
                 continue;
             }
-            _ = midi.apply(&self.midi_bindings, message, .{
-                .values = &self.sliders,
-                .intensity = &self.wandering.intensity,
-                .wandering = &self.wandering.enabled,
-                .toggles = &self.toggles,
-            });
+            _ = midi.apply(&self.midi_bindings, message, self.midiSink());
+        }
+        self.syncLights(input);
+    }
+
+    fn midiSink(self: *App) midi.Sink {
+        return .{
+            .values = &self.sliders,
+            .intensity = &self.wandering.intensity,
+            .wandering = &self.wandering.enabled,
+            .toggles = &self.toggles,
+            .law = &self.fold_kind,
+        };
+    }
+
+    /// Light a switch's control the way the panel shows it, including changes
+    /// made with the mouse, and send only what moved.
+    fn syncLights(self: *App, input: *midi.Input) void {
+        const sink = self.midiSink();
+        for (self.midi_bindings.list.items) |*binding| {
+            const lit = midi.lightOf(binding.*, sink) orelse continue;
+            if (binding.lit == lit) continue;
+            // Only a light that reached the controller is remembered; before a
+            // destination is known the next frame tries again.
+            if (input.send(binding.signature, lit)) binding.lit = lit;
         }
     }
 

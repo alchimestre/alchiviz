@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const c = @import("midi-c");
+const folding = @import("fold.zig");
 const wander = @import("wander.zig");
 const stages = @import("stages.zig");
 
@@ -52,6 +53,8 @@ pub const Target = union(enum) {
     intensity,
     wander: wander.Parameter,
     stage: stages.Stage,
+    /// The fold mapping the dropdown picks, so each one gets its own pad.
+    law: folding.Fold,
 
     /// The row's name in the menu.
     pub fn name(self: Target) []const u8 {
@@ -60,17 +63,19 @@ pub const Target = union(enum) {
             .intensity => "intensity",
             .wander => |parameter| @tagName(parameter),
             .stage => |stage| @tagName(stage),
+            .law => |law| @tagName(law),
         };
     }
 
-    /// How the target is written in the config file. Stages and wander ticks
-    /// share their names with sliders, so they carry a prefix.
+    /// How the target is written in the config file. Stages, folds and wander
+    /// ticks share their names with sliders, so they carry a prefix.
     pub fn key(self: Target, buffer: []u8) []const u8 {
         return switch (self) {
             .knob => |parameter| @tagName(parameter),
             .intensity => "intensity",
             .wander => |parameter| std.fmt.bufPrint(buffer, "wander {s}", .{@tagName(parameter)}) catch @tagName(parameter),
             .stage => |stage| std.fmt.bufPrint(buffer, "stage {s}", .{@tagName(stage)}) catch @tagName(stage),
+            .law => |law| std.fmt.bufPrint(buffer, "law {s}", .{@tagName(law)}) catch @tagName(law),
         };
     }
 
@@ -78,7 +83,7 @@ pub const Target = union(enum) {
     pub fn continuous(self: Target) bool {
         return switch (self) {
             .knob, .intensity => true,
-            .wander, .stage => false,
+            .wander, .stage, .law => false,
         };
     }
 };
@@ -103,11 +108,20 @@ pub const stages_list = blk: {
     break :blk list;
 };
 
+pub const laws = blk: {
+    var list: [std.enums.values(folding.Fold).len]Target = undefined;
+    for (std.enums.values(folding.Fold), 0..) |law, index| list[index] = .{ .law = law };
+    break :blk list;
+};
+
 pub const Mode = enum {
     /// The value sets the target directly; anything over half counts as on.
     absolute,
     /// A press flips the target and a release does nothing.
     latch,
+    /// Every message flips the target. A pad set to Toggle in Components
+    /// sends 127 and 0 on successive presses, so its release is a press here.
+    toggle,
 };
 
 /// Sliders take a value; everything else takes a press.
@@ -122,6 +136,9 @@ pub const Binding = struct {
     /// The last value seen, so a latch flips once per press rather than once
     /// per packet.
     last: u7 = 0,
+    /// What the controller's light last showed for this binding, so feedback
+    /// goes out only when it changes. Not part of the config file.
+    lit: ?bool = null,
 };
 
 pub const Bindings = struct {
@@ -174,6 +191,13 @@ pub const Bindings = struct {
         return null;
     }
 
+    pub fn forTargetMut(self: *Bindings, target: Target) ?*Binding {
+        for (self.list.items) |*binding| {
+            if (std.meta.eql(binding.target, target)) return binding;
+        }
+        return null;
+    }
+
     /// The file body, one binding per line.
     pub fn text(self: *const Bindings, allocator: std.mem.Allocator) ![]u8 {
         var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -202,6 +226,7 @@ pub const header =
     \\# alchiviz midi: one binding per line.
     \\#   cc 5 = speed              a control change drives a slider
     \\#   note 41 = stage fold      a pad flips a switch
+    \\#   note 50 = law rings       a pad picks one of the folds
     \\#   ch 8 cc 5 = blur          "ch" pins the channel, 0 to 15; without it
     \\#                             every channel is accepted
     \\#   cc 20 = speed             two lines on one control are a macro: that
@@ -216,6 +241,7 @@ pub const Sink = struct {
     intensity: *f32,
     wandering: *std.EnumSet(wander.Parameter),
     toggles: *stages.Toggles,
+    law: *folding.Fold,
 };
 
 /// Apply one message to every binding that listens to it. Returns whether
@@ -232,6 +258,10 @@ pub fn apply(bindings: *Bindings, message: Message, sink: Sink) bool {
                 if (!pressed) continue;
                 break :blk !switched(binding.target, sink);
             },
+            .toggle => blk: {
+                binding.last = message.value;
+                break :blk !switched(binding.target, sink);
+            },
         };
         switch (binding.target) {
             .knob => |parameter| switch (parameter) {
@@ -246,6 +276,8 @@ pub fn apply(bindings: *Bindings, message: Message, sink: Sink) bool {
                 if (on) sink.wandering.insert(parameter) else sink.wandering.remove(parameter);
             },
             .stage => |stage| sink.toggles.set(stage, on),
+            // A fold is a choice, not a switch: pressing its pad picks it.
+            .law => |law| sink.law.* = law,
         }
         changed = true;
     }
@@ -256,11 +288,21 @@ fn switched(target: Target, sink: Sink) bool {
     return switch (target) {
         .wander => |parameter| sink.wandering.contains(parameter),
         .stage => |stage| sink.toggles.enabled(stage),
+        .law => |law| sink.law.* == law,
         .knob, .intensity => false,
     };
 }
 
-/// `[ch <n>] (cc|note) <n> = <target> [absolute|latch]`
+/// What the controller's light should show for a binding, or null when the
+/// target is a slider with no light of its own.
+pub fn lightOf(binding: Binding, sink: Sink) ?bool {
+    return switch (binding.target) {
+        .knob, .intensity => null,
+        else => switched(binding.target, sink),
+    };
+}
+
+/// `[ch <n>] (cc|note) <n> = <target> [absolute|latch|toggle]`
 pub fn parseLine(line: []const u8) ?Binding {
     // A trailing comment is prose, not a target.
     const code = if (std.mem.indexOfScalar(u8, line, '#')) |comment| line[0..comment] else line;
@@ -303,6 +345,10 @@ fn parseTarget(tokens: *std.mem.TokenIterator(u8, .any)) ?Target {
     if (std.mem.eql(u8, token, "wander")) {
         const name = tokens.next() orelse return null;
         return .{ .wander = std.meta.stringToEnum(wander.Parameter, name) orelse return null };
+    }
+    if (std.mem.eql(u8, token, "law")) {
+        const name = tokens.next() orelse return null;
+        return .{ .law = std.meta.stringToEnum(folding.Fold, name) orelse return null };
     }
     return .{ .knob = std.meta.stringToEnum(wander.Parameter, token) orelse return null };
 }
@@ -357,6 +403,12 @@ pub fn configPath(environ: *const std.process.Environ.Map, buffer: []u8) ?[]cons
 pub const Input = struct {
     client: c.MIDIClientRef = 0,
     port: c.MIDIPortRef = 0,
+    /// The port that drives the controller's lights, and the destination it
+    /// picked once a source has spoken.
+    output: c.MIDIPortRef = 0,
+    destination: c.MIDIEndpointRef = 0,
+    destination_name: [96]u8 = undefined,
+    destination_len: usize = 0,
     sources: usize = 0,
     queue: Queue = .{},
     /// The source that last sent, so the menu names the controller in use
@@ -387,6 +439,8 @@ pub const Input = struct {
             self.client = 0;
             return error.MidiPort;
         }
+        // Feedback is optional: without an output port the app still plays.
+        if (c.MIDIOutputPortCreate(self.client, name, &self.output) != 0) self.output = 0;
 
         const count = c.MIDIGetNumberOfSources();
         var index: usize = 0;
@@ -403,8 +457,11 @@ pub const Input = struct {
     pub fn stop(self: *Input, allocator: std.mem.Allocator) void {
         if (self.started) {
             _ = c.MIDIPortDispose(self.port);
+            if (self.output != 0) _ = c.MIDIPortDispose(self.output);
             _ = c.MIDIClientDispose(self.client);
             self.port = 0;
+            self.output = 0;
+            self.destination = 0;
             self.client = 0;
             self.sources = 0;
             self.started = false;
@@ -412,9 +469,73 @@ pub const Input = struct {
         allocator.destroy(self);
     }
 
-    /// The next message, oldest first, or null when nothing is waiting.
+    /// The next message, oldest first, or null when nothing is waiting. The
+    /// queue's sender is copied out here, because only this thread reads it.
     pub fn next(self: *Input) ?Message {
-        return self.queue.pop();
+        const message = self.queue.pop();
+        if (message != null) self.origin.store(self.queue.origin.load(.acquire), .release);
+        return message;
+    }
+
+    /// Set one control's light. The Launch Control colours a control from a
+    /// channel 1 control change at the control's index, and lights a pad from
+    /// a note, so the message mirrors what the control sends. Returns false
+    /// when there is nothing to send it to, so the caller does not remember a
+    /// light it never set.
+    pub fn send(self: *Input, signature: Signature, on: bool) bool {
+        if (!self.started or self.output == 0) return false;
+        self.resolveDestination();
+        if (self.destination == 0) return false;
+
+        const value: u7 = if (on) 127 else 0;
+        const channel = signature.channel orelse 0;
+        const status: u8 = switch (signature.kind) {
+            .cc => 0xB0,
+            .note => 0x90 | @as(u8, channel),
+        };
+        return c.alchiviz_midi_send3(self.output, self.destination, status, signature.control, value) == 0;
+    }
+
+    /// Feedback goes to the destination that shares the longest name prefix
+    /// with the source that is sending, so two controllers do not talk over
+    /// each other's lights.
+    fn resolveDestination(self: *Input) void {
+        if (self.destination != 0) return;
+        const origin = self.origin.load(.acquire);
+        if (origin == 0) return;
+
+        var origin_buffer: [96]u8 = undefined;
+        const origin_name = origin_buffer[0 .. displayName(origin, &origin_buffer) orelse return];
+
+        var best: c.MIDIEndpointRef = 0;
+        var best_shared: usize = 4;
+        var best_name: [96]u8 = undefined;
+        var best_name_len: usize = 0;
+        const count = c.MIDIGetNumberOfDestinations();
+        var index: usize = 0;
+        while (index < count) : (index += 1) {
+            const candidate = c.MIDIGetDestination(index);
+            if (candidate == 0) continue;
+            var name_buffer: [96]u8 = undefined;
+            const name = name_buffer[0 .. displayName(candidate, &name_buffer) orelse continue];
+            const shared = commonPrefix(origin_name, name);
+            if (shared > best_shared) {
+                best_shared = shared;
+                best = candidate;
+                best_name_len = name.len;
+                @memcpy(best_name[0..name.len], name);
+            }
+        }
+        self.destination = best;
+        self.destination_len = best_name_len;
+        @memcpy(self.destination_name[0..best_name_len], best_name[0..best_name_len]);
+    }
+
+    /// The destination the lights go to, once one has been picked; the menu
+    /// shows it so a controller with no matching destination is visible.
+    pub fn destinationName(self: *const Input) ?[]const u8 {
+        if (self.destination_len == 0) return null;
+        return self.destination_name[0..self.destination_len];
     }
 
     pub fn deviceName(self: *Input) []const u8 {
@@ -507,6 +628,15 @@ pub fn parseMessage(bytes: []const u8) ?Message {
 
 /// The endpoint's display name, copied into `buffer`. Returns its length, or
 /// null when the framework has no name for it.
+/// Leading bytes two endpoint names share, so a source is paired with the
+/// destination of the same device.
+fn commonPrefix(a: []const u8, b: []const u8) usize {
+    const shortest = @min(a.len, b.len);
+    var index: usize = 0;
+    while (index < shortest and a[index] == b[index]) : (index += 1) {}
+    return index;
+}
+
 fn displayName(endpoint: c.MIDIEndpointRef, buffer: []u8) ?usize {
     var text: c.CFStringRef = null;
     if (c.MIDIObjectGetStringProperty(endpoint, c.kMIDIPropertyDisplayName, &text) != 0 or text == null) return null;
@@ -551,7 +681,8 @@ test "a control change reaches the matching binding" {
     var intensity: f32 = 0;
     var wandering: std.EnumSet(wander.Parameter) = .empty;
     var toggles: stages.Toggles = .{};
-    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles };
+    var law: folding.Fold = .tunnel;
+    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law };
 
     try std.testing.expect(apply(&bindings, .{ .kind = .cc, .channel = 8, .control = 5, .value = 127 }, sink));
     try std.testing.expectApproxEqAbs(@as(f32, 1), values.blur, 0.001);
@@ -573,7 +704,8 @@ test "a channel-pinned binding ignores other channels" {
     var intensity: f32 = 0;
     var wandering: std.EnumSet(wander.Parameter) = .empty;
     var toggles: stages.Toggles = .{};
-    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles };
+    var law: folding.Fold = .tunnel;
+    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law };
 
     try std.testing.expect(!apply(&bindings, .{ .kind = .cc, .channel = 7, .control = 5, .value = 127 }, sink));
     try std.testing.expect(apply(&bindings, .{ .kind = .cc, .channel = 8, .control = 5, .value = 127 }, sink));
@@ -591,7 +723,8 @@ test "a latch flips once per press and ignores the release" {
     var intensity: f32 = 0;
     var wandering: std.EnumSet(wander.Parameter) = .empty;
     var toggles: stages.Toggles = .{};
-    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles };
+    var law: folding.Fold = .tunnel;
+    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law };
 
     const pressed: Message = .{ .kind = .note, .channel = 0, .control = 41, .value = 127 };
     const released: Message = .{ .kind = .note, .channel = 0, .control = 41, .value = 0 };
@@ -607,6 +740,106 @@ test "a latch flips once per press and ignores the release" {
     try std.testing.expect(toggles.mirrors);
 }
 
+test "a toggle pad flips on both of its values" {
+    var bindings: Bindings = .{};
+    defer bindings.deinit(std.testing.allocator);
+    try bindings.put(std.testing.allocator, .{
+        .signature = .{ .kind = .note, .channel = 0, .control = 42 },
+        .target = .{ .stage = .spin },
+        .mode = .toggle,
+    });
+    var values: wander.Values = .{};
+    var intensity: f32 = 0;
+    var wandering: std.EnumSet(wander.Parameter) = .empty;
+    var toggles: stages.Toggles = .{};
+    var law: folding.Fold = .tunnel;
+    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law };
+
+    const button: Signature = .{ .kind = .note, .channel = 0, .control = 42 };
+    try std.testing.expect(toggles.spin);
+    // A pad set to Toggle in Components sends 127, then 0, then 127…
+    _ = apply(&bindings, .{ .kind = button.kind, .channel = 0, .control = 42, .value = 127 }, sink);
+    try std.testing.expect(!toggles.spin);
+    _ = apply(&bindings, .{ .kind = button.kind, .channel = 0, .control = 42, .value = 0 }, sink);
+    try std.testing.expect(toggles.spin);
+    _ = apply(&bindings, .{ .kind = button.kind, .channel = 0, .control = 42, .value = 127 }, sink);
+    try std.testing.expect(!toggles.spin);
+}
+
+test "each fold picks its law from its own pad" {
+    var bindings: Bindings = .{};
+    defer bindings.deinit(std.testing.allocator);
+    try bindings.put(std.testing.allocator, .{
+        .signature = .{ .kind = .note, .channel = 0, .control = 50 },
+        .target = .{ .law = .tunnel },
+        .mode = .latch,
+    });
+    try bindings.put(std.testing.allocator, .{
+        .signature = .{ .kind = .note, .channel = 0, .control = 51 },
+        .target = .{ .law = .rings },
+        .mode = .latch,
+    });
+    var values: wander.Values = .{};
+    var intensity: f32 = 0;
+    var wandering: std.EnumSet(wander.Parameter) = .empty;
+    var toggles: stages.Toggles = .{};
+    var law: folding.Fold = .mandelbrot;
+    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law };
+
+    _ = apply(&bindings, .{ .kind = .note, .channel = 0, .control = 51, .value = 127 }, sink);
+    try std.testing.expectEqual(folding.Fold.rings, law);
+
+    _ = apply(&bindings, .{ .kind = .note, .channel = 0, .control = 50, .value = 127 }, sink);
+    try std.testing.expectEqual(folding.Fold.tunnel, law);
+
+    // A selected fold is lit; the pads for the others are dark.
+    const tunnel = bindings.forTarget(.{ .law = .tunnel }).?;
+    const rings = bindings.forTarget(.{ .law = .rings }).?;
+    try std.testing.expectEqual(true, lightOf(tunnel.*, sink).?);
+    try std.testing.expectEqual(false, lightOf(rings.*, sink).?);
+}
+
+test "a slider has no light to drive" {
+    var values: wander.Values = .{};
+    var intensity: f32 = 0;
+    var wandering: std.EnumSet(wander.Parameter) = .empty;
+    var toggles: stages.Toggles = .{};
+    var law: folding.Fold = .tunnel;
+    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law };
+
+    const binding: Binding = .{
+        .signature = .{ .kind = .cc, .channel = null, .control = 5 },
+        .target = .{ .knob = .speed },
+        .mode = .absolute,
+    };
+    try std.testing.expect(lightOf(binding, sink) == null);
+
+    const tick: Binding = .{
+        .signature = .{ .kind = .cc, .channel = null, .control = 6 },
+        .target = .{ .wander = .speed },
+        .mode = .latch,
+    };
+    try std.testing.expectEqual(false, lightOf(tick, sink).?);
+}
+
+test "a fold pad and a toggle mode survive the file" {
+    const binding = parseLine("note 50 = law rings toggle") orelse return error.NotParsed;
+    try std.testing.expectEqual(Mode.toggle, binding.mode);
+    try std.testing.expectEqual(folding.Fold.rings, binding.target.law);
+
+    var bindings: Bindings = .{};
+    defer bindings.deinit(std.testing.allocator);
+    try bindings.put(std.testing.allocator, binding);
+    const text = try bindings.text(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "note 50 = law rings toggle") != null);
+}
+
+test "a destination pairs with the source of the same device" {
+    try std.testing.expect(commonPrefix("LCXL3 1 MIDI Out", "LCXL3 1 MIDI In") > 4);
+    try std.testing.expect(commonPrefix("LCXL3 1 MIDI Out", "Traktor Z1 MK2") < 4);
+}
+
 test "two bindings on one control move both targets" {
     var bindings: Bindings = .{};
     defer bindings.deinit(std.testing.allocator);
@@ -618,7 +851,8 @@ test "two bindings on one control move both targets" {
     var intensity: f32 = 0;
     var wandering: std.EnumSet(wander.Parameter) = .empty;
     var toggles: stages.Toggles = .{};
-    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles };
+    var law: folding.Fold = .tunnel;
+    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law };
     _ = apply(&bindings, .{ .kind = .cc, .channel = 3, .control = 20, .value = 127 }, sink);
     try std.testing.expectApproxEqAbs(@as(f32, 1), values.blur, 0.001);
     try std.testing.expectApproxEqAbs(wander.Parameter.speed.track().max, values.speed, 0.001);
