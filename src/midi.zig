@@ -55,8 +55,16 @@ pub const Target = union(enum) {
     stage: stages.Stage,
     /// The fold mapping the dropdown picks, so each one gets its own pad.
     law: folding.Fold,
+    /// An action that changes the app itself rather than a value in it.
+    command: Command,
 
     /// The row's name in the menu.
+    pub const Command = enum {
+        fullscreen,
+        /// Hides and shows the control panel.
+        ui,
+    };
+
     pub fn name(self: Target) []const u8 {
         return switch (self) {
             .knob => |parameter| @tagName(parameter),
@@ -64,6 +72,7 @@ pub const Target = union(enum) {
             .wander => |parameter| @tagName(parameter),
             .stage => |stage| @tagName(stage),
             .law => |law| @tagName(law),
+            .command => |command| @tagName(command),
         };
     }
 
@@ -76,6 +85,7 @@ pub const Target = union(enum) {
             .wander => |parameter| std.fmt.bufPrint(buffer, "wander {s}", .{@tagName(parameter)}) catch @tagName(parameter),
             .stage => |stage| std.fmt.bufPrint(buffer, "stage {s}", .{@tagName(stage)}) catch @tagName(stage),
             .law => |law| std.fmt.bufPrint(buffer, "law {s}", .{@tagName(law)}) catch @tagName(law),
+            .command => |command| @tagName(command),
         };
     }
 
@@ -83,7 +93,7 @@ pub const Target = union(enum) {
     pub fn continuous(self: Target) bool {
         return switch (self) {
             .knob, .intensity => true,
-            .wander, .stage, .law => false,
+            .wander, .stage, .law, .command => false,
         };
     }
 };
@@ -111,6 +121,12 @@ pub const stages_list = blk: {
 pub const laws = blk: {
     var list: [std.enums.values(folding.Fold).len]Target = undefined;
     for (std.enums.values(folding.Fold), 0..) |law, index| list[index] = .{ .law = law };
+    break :blk list;
+};
+
+pub const commands_list = blk: {
+    var list: [std.enums.values(Target.Command).len]Target = undefined;
+    for (std.enums.values(Target.Command), 0..) |command, index| list[index] = .{ .command = command };
     break :blk list;
 };
 
@@ -292,12 +308,16 @@ pub const header =
 
 /// The values a binding writes. Separate from the widgets so a mapping can be
 /// tested without a window.
+/// Commands a message asked for, drained by the app once per frame.
+pub const Commands = std.EnumSet(Target.Command);
+
 pub const Sink = struct {
     values: *wander.Values,
     intensity: *f32,
     wandering: *std.EnumSet(wander.Parameter),
     toggles: *stages.Toggles,
     law: *folding.Fold,
+    commands: *Commands,
 };
 
 /// Apply one message to every binding that listens to it. Returns whether
@@ -337,6 +357,11 @@ pub fn apply(bindings: *Bindings, message: Message, sink: Sink, now_ms: i64) boo
             .stage => |stage| sink.toggles.set(stage, on),
             // A fold is a choice, not a switch: pressing its pad picks it.
             .law => |law| sink.law.* = law,
+            // A command has no state to flip, so only a press counts.
+            .command => |command| {
+                if (message.value < 64) continue;
+                sink.commands.insert(command);
+            },
         }
         changed = true;
     }
@@ -348,7 +373,7 @@ fn switched(target: Target, sink: Sink) bool {
         .wander => |parameter| sink.wandering.contains(parameter),
         .stage => |stage| sink.toggles.enabled(stage),
         .law => |law| sink.law.* == law,
-        .knob, .intensity => false,
+        .knob, .intensity, .command => false,
     };
 }
 
@@ -358,7 +383,7 @@ fn switched(target: Target, sink: Sink) bool {
 /// no state to show.
 pub fn colourOf(binding: Binding, sink: Sink) ?Colour {
     const on = switch (binding.target) {
-        .knob, .intensity => return null,
+        .knob, .intensity, .command => return null,
         else => switched(binding.target, sink),
     };
     return if (on) .lit else .off;
@@ -412,6 +437,7 @@ fn parseTarget(tokens: *std.mem.TokenIterator(u8, .any)) ?Target {
         const name = tokens.next() orelse return null;
         return .{ .law = std.meta.stringToEnum(folding.Fold, name) orelse return null };
     }
+    if (std.meta.stringToEnum(Target.Command, token)) |command| return .{ .command = command };
     return .{ .knob = std.meta.stringToEnum(wander.Parameter, token) orelse return null };
 }
 
@@ -841,7 +867,8 @@ test "a control change reaches the matching binding" {
     var wandering: std.EnumSet(wander.Parameter) = .empty;
     var toggles: stages.Toggles = .{};
     var law: folding.Fold = .tunnel;
-    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law };
+    var commands: Commands = .init(.{});
+    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law, .commands = &commands };
 
     try std.testing.expect(apply(&bindings, .{ .kind = .cc, .channel = 8, .control = 5, .value = 127 }, sink, 0));
     try std.testing.expectApproxEqAbs(@as(f32, 1), values.blur, 0.001);
@@ -864,10 +891,45 @@ test "a channel-pinned binding ignores other channels" {
     var wandering: std.EnumSet(wander.Parameter) = .empty;
     var toggles: stages.Toggles = .{};
     var law: folding.Fold = .tunnel;
-    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law };
+    var commands: Commands = .init(.{});
+    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law, .commands = &commands };
 
     try std.testing.expect(!apply(&bindings, .{ .kind = .cc, .channel = 7, .control = 5, .value = 127 }, sink, 0));
     try std.testing.expect(apply(&bindings, .{ .kind = .cc, .channel = 8, .control = 5, .value = 127 }, sink, 0));
+}
+
+test "an action pad fires once per press and shows no light" {
+    var bindings: Bindings = .{};
+    defer bindings.deinit(std.testing.allocator);
+    try bindings.put(std.testing.allocator, .{
+        .signature = .{ .kind = .cc, .channel = 0, .control = 60 },
+        .target = .{ .command = .ui },
+        .mode = .latch,
+    });
+    var values: wander.Values = .{};
+    var intensity: f32 = 0;
+    var wandering: std.EnumSet(wander.Parameter) = .empty;
+    var toggles: stages.Toggles = .{};
+    var law: folding.Fold = .tunnel;
+    var commands: Commands = .init(.{});
+    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law, .commands = &commands };
+
+    try std.testing.expect(apply(&bindings, .{ .kind = .cc, .channel = 0, .control = 60, .value = 127 }, sink, 0));
+    try std.testing.expect(commands.contains(.ui));
+    commands = .init(.{});
+    // The release that follows a press must not fire it a second time.
+    try std.testing.expect(!apply(&bindings, .{ .kind = .cc, .channel = 0, .control = 60, .value = 0 }, sink, 100));
+    try std.testing.expectEqual(Commands.init(.{}), commands);
+    try std.testing.expectEqual(null, colourOf(bindings.list.items[0], sink));
+}
+
+test "the config names the two actions" {
+    const fullscreen = parseLine("cc 61 = fullscreen").?;
+    try std.testing.expectEqual(Target.Command.fullscreen, fullscreen.target.command);
+    try std.testing.expectEqual(Mode.latch, fullscreen.mode);
+    const ui = parseLine("ch 0 cc 62 = ui toggle").?;
+    try std.testing.expectEqual(Target.Command.ui, ui.target.command);
+    try std.testing.expectEqual(Mode.toggle, ui.mode);
 }
 
 test "a latch flips once per press and ignores the release" {
@@ -883,7 +945,8 @@ test "a latch flips once per press and ignores the release" {
     var wandering: std.EnumSet(wander.Parameter) = .empty;
     var toggles: stages.Toggles = .{};
     var law: folding.Fold = .tunnel;
-    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law };
+    var commands: Commands = .init(.{});
+    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law, .commands = &commands };
 
     const pressed: Message = .{ .kind = .note, .channel = 0, .control = 41, .value = 127 };
     const released: Message = .{ .kind = .note, .channel = 0, .control = 41, .value = 0 };
@@ -924,7 +987,8 @@ test "a toggle pad flips once per press whatever value it sends" {
     var wandering: std.EnumSet(wander.Parameter) = .empty;
     var toggles: stages.Toggles = .{};
     var law: folding.Fold = .tunnel;
-    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law };
+    var commands: Commands = .init(.{});
+    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law, .commands = &commands };
 
     // A pad set to Toggle in Components sends 127, then 0, then 127…
     try std.testing.expect(toggles.mirrors);
@@ -949,7 +1013,8 @@ test "a toggle pad flips on both of its values" {
     var wandering: std.EnumSet(wander.Parameter) = .empty;
     var toggles: stages.Toggles = .{};
     var law: folding.Fold = .tunnel;
-    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law };
+    var commands: Commands = .init(.{});
+    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law, .commands = &commands };
 
     const button: Signature = .{ .kind = .note, .channel = 0, .control = 42 };
     try std.testing.expect(toggles.spin);
@@ -980,7 +1045,8 @@ test "each fold picks its law from its own pad" {
     var wandering: std.EnumSet(wander.Parameter) = .empty;
     var toggles: stages.Toggles = .{};
     var law: folding.Fold = .mandelbrot;
-    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law };
+    var commands: Commands = .init(.{});
+    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law, .commands = &commands };
 
     _ = apply(&bindings, .{ .kind = .note, .channel = 0, .control = 51, .value = 127 }, sink, 0);
     try std.testing.expectEqual(folding.Fold.rings, law);
@@ -1001,7 +1067,8 @@ test "a slider has no light to drive" {
     var wandering: std.EnumSet(wander.Parameter) = .empty;
     var toggles: stages.Toggles = .{};
     var law: folding.Fold = .tunnel;
-    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law };
+    var commands: Commands = .init(.{});
+    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law, .commands = &commands };
 
     const binding: Binding = .{
         .signature = .{ .kind = .cc, .channel = null, .control = 5 },
@@ -1050,7 +1117,8 @@ test "two bindings on one control move both targets" {
     var wandering: std.EnumSet(wander.Parameter) = .empty;
     var toggles: stages.Toggles = .{};
     var law: folding.Fold = .tunnel;
-    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law };
+    var commands: Commands = .init(.{});
+    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law, .commands = &commands };
     _ = apply(&bindings, .{ .kind = .cc, .channel = 3, .control = 20, .value = 127 }, sink, 0);
     try std.testing.expectApproxEqAbs(@as(f32, 1), values.blur, 0.001);
     try std.testing.expectApproxEqAbs(wander.Parameter.speed.track().max, values.speed, 0.001);
