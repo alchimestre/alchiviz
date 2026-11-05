@@ -1,15 +1,9 @@
-//! The DMT fold: the frame is mirrored up and down, left and right, then
-//! folded into a turning funnel.
-//!
-//! `fold` is the whole visual model: it maps a screen point to the texel shown
-//! there. Every pass mirrors both axes, shifts a little and samples further
-//! out, so the picture repeats as nested, mirrored copies. The funnel pull
-//! grows toward the middle, which bends those copies into a funnel. Colour is
-//! the frame's own; the effect only moves pixels.
+//! Screen-to-texture folds, their clock, slider tracks and CPU mesh.
 
 const std = @import("std");
 const dvui = @import("dvui");
 const geom = @import("geom.zig");
+const mandelbrot = @import("mandelbrot.zig");
 const stages = @import("stages.zig");
 
 /// Folds an angle into one wedge of a kaleidoscope with `mirrors` facets, so
@@ -21,7 +15,7 @@ fn mirrorFold(angle: f32, mirrors: f32) f32 {
     return @min(within, sector - within);
 }
 
-/// The fold's radial law: how a screen radius picks its place in the frame.
+/// The screen-to-texture mapping offered by the fold dropdown.
 pub const Fold = enum {
     /// Log radius, so rings keep their thickness as they run out and the
     /// picture reads as a tunnel receding toward the middle.
@@ -29,14 +23,31 @@ pub const Fold = enum {
     /// Linear radius, so each ring is wider than the one inside it and the
     /// frame reads as copies of itself expanding from the middle.
     rings,
+    mandelbrot,
 };
 
-/// The radius the rest of the fold measures rings in.
-fn depthRadius(kind: Fold, radius: f32, half: f32) f32 {
-    return switch (kind) {
-        .tunnel => @log(radius / half + 0.01),
-        .rings => radius / half,
+const Coordinates = struct { depth: f32, angle: f32 };
+
+fn mandelbrotShot(zoom_phase: f32, zoom_incoming: bool) mandelbrot.Shot {
+    const route = mandelbrot.transition(zoom_phase);
+    return if (zoom_incoming) route.incoming else route.front;
+}
+
+fn coordinates(kind: Fold, point: dvui.Point.Physical, half: f32, zoom_phase: f32, zoom_incoming: bool) Coordinates {
+    if (kind == .mandelbrot) {
+        const shot = mandelbrotShot(zoom_phase, zoom_incoming);
+        return coordinatesForShot(point, half, shot);
+    }
+    const radius = @sqrt(point.x * point.x + point.y * point.y);
+    return .{
+        .depth = if (kind == .tunnel) @log(radius / half + 0.01) else radius / half,
+        .angle = std.math.atan2(point.y, point.x),
     };
+}
+
+fn coordinatesForShot(point: dvui.Point.Physical, half: f32, shot: mandelbrot.Shot) Coordinates {
+    const mapped = mandelbrot.coordinates(point, half, shot);
+    return .{ .depth = mapped.depth, .angle = mapped.angle };
 }
 
 /// The band a ring shows: every other ring is reflected, so the picture mirrors
@@ -82,6 +93,7 @@ pub const kick_track: Track = .{ .min = 0, .max = 1 };
 
 /// How far one kick pushes the rings outward, in ring widths.
 const kick_push: f32 = 0.8;
+const mandelbrot_kick_push: f32 = 0.04;
 
 /// Rings the loudness adds on top of the lanes slider.
 const ring_push: f32 = 1.1;
@@ -180,8 +192,7 @@ pub const Track = struct {
     }
 };
 
-/// Slider tracks for the DMT panel. The mixer's DMT mode drove the same seven
-/// values, so a slider reads the same amount in either app.
+/// The effect clock's speed range.
 pub const speed_track: Track = .{ .min = 0.2, .max = 2 };
 
 /// Smooth, repeatable motion bounded by `limit`.
@@ -206,8 +217,7 @@ fn wanderGoal(epoch: i64) f32 {
 /// end is the real window, the right end is six times it.
 pub const window_track: Track = .{ .min = 1, .max = 6, .geometric = true };
 
-/// The window the fold is laid out on: the real window when DMT started,
-/// scaled.
+/// The reference window scaled to the fold's virtual canvas.
 pub fn virtualSize(base: dvui.Size.Physical, scale: f32) dvui.Size.Physical {
     return .{ .w = base.w * scale, .h = base.h * scale };
 }
@@ -282,51 +292,53 @@ pub fn fold(
     canvas: dvui.Size.Physical,
     stills: []const dvui.Rect.Physical,
 ) dvui.Point.Physical {
+    return foldWithShot(p, view, size, canvas, stills, null);
+}
+
+fn foldWithShot(
+    p: dvui.Point.Physical,
+    view: Lens,
+    size: dvui.Size.Physical,
+    canvas: dvui.Size.Physical,
+    stills: []const dvui.Rect.Physical,
+    selected_shot: ?mandelbrot.Shot,
+) dvui.Point.Physical {
     if (size.w <= 0 or size.h <= 0) return p;
     if (canvas.w <= 0 or canvas.h <= 0) return p;
-
-    // The controls sit out of the fold, with a soft edge so nothing next to
-    // them is torn.
     const strength = geom.stillMask(p.x, p.y, stills, view.calm);
     if (strength <= 0) return p;
-
-    // Radius is measured against the virtual window, so the ring the point
-    // lands in depends on the canvas and never on how big the real window is.
     const half = @min(canvas.w, canvas.h) / 2;
-    const centre = dvui.Point.Physical{ .x = size.w / 2, .y = size.h / 2 };
-    const q = dvui.Point.Physical{ .x = p.x - centre.x, .y = p.y - centre.y };
-    const radius = @sqrt(q.x * q.x + q.y * q.y);
+    const q = dvui.Point.Physical{ .x = p.x - size.w / 2, .y = p.y - size.h / 2 };
+    const mapped = if (selected_shot) |shot|
+        coordinatesForShot(q, half, shot)
+    else
+        coordinates(view.fold, q, half, view.zoom_phase, view.zoom_incoming);
+    const source = sampleCoordinates(mapped, view, size, half);
+    return .{
+        .x = mix(p.x, source.x, strength),
+        .y = mix(p.y, source.y, strength),
+    };
+}
 
-    // The radius picks the ring, and alternate rings are reflected, so the
-    // picture mirrors outwards from the middle.
-    const depth_radius = depthRadius(view.fold, radius, half);
-    const angle0 = std.math.atan2(q.y, q.x);
-    const depth = depth_radius * view.ring_count - view.rush_phase - view.heart * view.kick_push;
+fn sampleCoordinates(mapped: Coordinates, view: Lens, size: dvui.Size.Physical, half: f32) dvui.Point.Physical {
+    const centre = dvui.Point.Physical{ .x = size.w / 2, .y = size.h / 2 };
+    const depth = mapped.depth * view.ring_count - view.rush_phase - view.heart * view.kick_push;
     const level = @floor(depth);
     const band = foldBand(level, depth - level);
-
-    const turned_angle = angle0 + view.turn_phase * view.spin_rate + depth * view.ring_shift;
+    const turned_angle = mapped.angle + view.turn_phase * view.spin_rate + depth * view.ring_shift;
     const angle = mirrorFold(turned_angle, view.mirrors);
-
-    // The sweep: from the middle of the frame out to its edge and back, which
-    // is what reads as expansion. Continuous mode needs the band unwrapped so
-    // odd and even seams meet at the frame edge; the staggered mapping wraps so
-    // a band that rounds up to 1 stays inside instead of on the edge.
-    const lane_band = if (view.continuous) band else @mod(band, 1);
+    const lane_band = if (view.fold == .mandelbrot or view.continuous) band else @mod(band, 1);
     const reach = half * lane_band;
     const local = dvui.Point.Physical{
         .x = @abs(@cos(angle)) * reach,
         .y = @abs(@sin(angle)) * reach,
     };
 
-    const turned = level * view.spin;
-    const source = dvui.Point.Physical{
+    const spin_depth = if (view.fold == .mandelbrot) depth else level;
+    const turned = spin_depth * view.spin;
+    return .{
         .x = wrap(centre.x + local.x * @cos(turned) - local.y * @sin(turned), size.w),
         .y = wrap(centre.y + local.x * @sin(turned) + local.y * @cos(turned), size.h),
-    };
-    return .{
-        .x = mix(p.x, wrap(source.x, size.w), strength),
-        .y = mix(p.y, wrap(source.y, size.h), strength),
     };
 }
 
@@ -349,6 +361,8 @@ fn wrap(v: f32, extent: f32) f32 {
 /// ones the CPU fold uses.
 pub const Lens = struct {
     rush_phase: f32,
+    zoom_phase: f32,
+    zoom_incoming: bool = false,
     turn_phase: f32,
     ring_count: f32,
     heart: f32,
@@ -362,17 +376,28 @@ pub const Lens = struct {
     continuous: bool,
 };
 
+fn vertexColor(view: Lens) dvui.Color.PMA {
+    var alpha: u8 = 255;
+    if (view.fold == .mandelbrot and view.zoom_incoming) {
+        const weight = mandelbrot.transition(view.zoom_phase).weight;
+        alpha = @intFromFloat(@round(weight * 255));
+    }
+    return dvui.Color.PMA.fromColor(.{ .r = 255, .g = 255, .b = 255, .a = alpha });
+}
+
 /// The lens with the stages that are switched off flattened out: no spin, no
 /// facets, no shear, no beat push.
 pub fn lens(clock: Clock, shape: FoldShape, toggles: stages.Toggles) Lens {
     const spinning = toggles.enabled(.spin);
     const pushing = toggles.enabled(.kick);
+    const kick_push_scale = if (shape.fold == .mandelbrot) mandelbrot_kick_push else kick_push;
     return .{
         .rush_phase = @floatCast(clock.rush * speed),
+        .zoom_phase = mandelbrot.phase(clock.rush),
         .turn_phase = if (spinning) @floatCast(clock.turn * speed) else 0,
         .ring_count = shape.ring_count,
         .heart = if (pushing) shape.heart else 0,
-        .kick_push = if (pushing) kick_push * shape.pump else 0,
+        .kick_push = if (pushing) kick_push_scale * shape.pump else 0,
         .mirrors = if (toggles.enabled(.mirrors)) shape.mirrors else 1,
         .spin_rate = if (spinning) spin_rate else 0,
         .spin = if (toggles.continuous) 0 else spin,
@@ -381,6 +406,10 @@ pub fn lens(clock: Clock, shape: FoldShape, toggles: stages.Toggles) Lens {
         .fold = shape.fold,
         .continuous = toggles.continuous,
     };
+}
+fn selectedMandelbrotShot(view: Lens) ?mandelbrot.Shot {
+    if (view.fold != .mandelbrot) return null;
+    return mandelbrotShot(view.zoom_phase, view.zoom_incoming);
 }
 
 /// A grid of quads over the window, every vertex showing a folded texel.
@@ -398,23 +427,22 @@ pub fn mesh(
     const across = grid.columns + 1;
     const down = @as(f32, @floatFromInt(grid.rows));
     const right = @as(f32, @floatFromInt(grid.columns));
-
     const vertexes = try arena.alloc(dvui.Vertex, across * (grid.rows + 1));
+    const vertex_color = vertexColor(view);
+    const selected_shot = selectedMandelbrotShot(view);
     var at: usize = 0;
     for (0..grid.rows + 1) |row| {
         const y = size.h * @as(f32, @floatFromInt(row)) / down;
         for (0..across) |column| {
             const x = size.w * @as(f32, @floatFromInt(column)) / right;
-            const source = fold(.{ .x = x, .y = y }, view, size, canvas, stills);
+            const source = foldWithShot(.{ .x = x, .y = y }, view, size, canvas, stills, selected_shot);
             const uv = dvui.Point.Physical{
                 .x = geom.sampleUV(source.x, size.w),
                 .y = geom.sampleUV(source.y, size.h),
             };
-            // Depth: the far end of the tunnel is dark and the near rim is
-            // bright, so the eye reads the rings as distance coming at it.
             vertexes[at] = .{
                 .pos = .{ .x = x, .y = y },
-                .col = .{ .r = 255, .g = 255, .b = 255 },
+                .col = vertex_color,
                 .uv = .{ uv.x, uv.y },
             };
             at += 1;
@@ -484,11 +512,23 @@ pub fn draw(
 ) !void {
     if (size.w <= 0 or size.h <= 0) return;
     const bounds = dvui.Rect.Physical{ .x = 0, .y = 0, .w = size.w, .h = size.h };
-
-    const grid = try mesh(arena, cache, view, size, canvas, stills);
+    var front_view = view;
+    front_view.zoom_incoming = false;
+    const front_grid = try mesh(arena, cache, front_view, size, canvas, stills);
     try dvui.renderTriangles(.{
-        .vertexes = grid.vertexes,
-        .indices = grid.indices,
+        .vertexes = front_grid.vertexes,
+        .indices = front_grid.indices,
+        .bounds = bounds,
+    }, texture);
+    if (view.fold != .mandelbrot) return;
+    const route = mandelbrot.transition(view.zoom_phase);
+    if (route.weight <= 0) return;
+    var incoming_view = view;
+    incoming_view.zoom_incoming = true;
+    const incoming_grid = try mesh(arena, cache, incoming_view, size, canvas, stills);
+    try dvui.renderTriangles(.{
+        .vertexes = incoming_grid.vertexes,
+        .indices = incoming_grid.indices,
         .bounds = bounds,
     }, texture);
 }
@@ -711,7 +751,7 @@ test "the facets mirror across their edges" {
     const angle: f32 = 0.3;
 
     const view = lens(.{ .rush = 0.7, .turn = 0.4 }, .{ .mirrors = 4, .heart = 0.6 }, .{});
-    const depth = depthRadius(view.fold, radius, size.w / 2) * view.ring_count -
+    const depth = coordinates(view.fold, .{ .x = radius, .y = 0 }, size.w / 2, view.zoom_phase, false).depth * view.ring_count -
         view.rush_phase - view.heart * view.kick_push;
     const rotation = view.turn_phase * view.spin_rate + depth * view.ring_shift;
     const first_angle = angle - rotation;
@@ -874,9 +914,9 @@ test "every other ring is reflected" {
 
 test "the rings fold expands outward where the tunnel recedes" {
     const half: f32 = 100;
-    try std.testing.expectApproxEqAbs(@as(f32, 2), depthRadius(.rings, 2 * half, half), 0.0001);
-    try std.testing.expectApproxEqAbs(@as(f32, 1), depthRadius(.rings, half, half), 0.0001);
-    try std.testing.expect(depthRadius(.tunnel, 2 * half, half) < depthRadius(.tunnel, half, half) + 0.7);
+    try std.testing.expectApproxEqAbs(@as(f32, 2), coordinates(.rings, .{ .x = 2 * half, .y = 0 }, half, 0, false).depth, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), coordinates(.rings, .{ .x = half, .y = 0 }, half, 0, false).depth, 0.0001);
+    try std.testing.expect(coordinates(.tunnel, .{ .x = 2 * half, .y = 0 }, half, 0, false).depth < coordinates(.tunnel, .{ .x = half, .y = 0 }, half, 0, false).depth + 0.7);
 }
 
 test "continuous sampling joins odd and even lane seams including the endpoint" {
@@ -886,7 +926,7 @@ test "continuous sampling joins odd and even lane seams including the endpoint" 
     for ([_]Fold{ .tunnel, .rings }) |kind| {
         var selected = shape;
         selected.fold = kind;
-        const radial_depth = depthRadius(kind, 512, 512) * shape.ring_count;
+        const radial_depth = coordinates(kind, .{ .x = 512, .y = 0 }, 512, 0, false).depth * shape.ring_count;
         for ([_]f32{ -2, -1, 0, 1 }) |seam| {
             var view = lens(.{}, selected, .{ .continuous = true });
             view.rush_phase = radial_depth - seam;
@@ -939,4 +979,96 @@ test "continuous mode controls endpoint wrapping and per-lane rotation" {
     const rotation_y = rotated.y - unrotated.y;
     const rotation_distance = @sqrt(rotation_x * rotation_x + rotation_y * rotation_y);
     try std.testing.expect(rotation_distance > minimum_lane_shift);
+}
+
+test "Mandelbrot samples stay finite and bounded across zoom and stage settings" {
+    const size = dvui.Size.Physical{ .w = 640, .h = 360 };
+    for ([_]f32{ 1, 2, 6 }) |zoom| {
+        for ([_]stages.Toggles{ .{}, .{ .continuous = true }, .{ .spin = false, .mirrors = false, .kick = false } }) |toggles| {
+            const view = lens(.{ .rush = 15, .turn = 3 }, .{ .fold = .mandelbrot, .heart = 1 }, toggles);
+            for (0..25) |index| {
+                const point = dvui.Point.Physical{
+                    .x = @as(f32, @floatFromInt(index % 5)) * size.w / 4,
+                    .y = @as(f32, @floatFromInt(index / 5)) * size.h / 4,
+                };
+                const sampled = fold(point, view, size, virtualSize(size, zoom), &.{});
+                try std.testing.expect(std.math.isFinite(sampled.x) and std.math.isFinite(sampled.y));
+                try std.testing.expect(sampled.x >= 0 and sampled.x <= size.w);
+                try std.testing.expect(sampled.y >= 0 and sampled.y <= size.h);
+            }
+        }
+    }
+}
+
+test "Mandelbrot selector maps each transition shot independently" {
+    const point = dvui.Point.Physical{ .x = 135, .y = -216 };
+    const half: f32 = 540;
+    const zoom_phase: f32 = 0.95;
+    const route = mandelbrot.transition(zoom_phase);
+    const front = coordinates(.mandelbrot, point, half, zoom_phase, false);
+    const incoming = coordinates(.mandelbrot, point, half, zoom_phase, true);
+    const expected_front = mandelbrot.coordinates(point, half, route.front);
+    const expected_incoming = mandelbrot.coordinates(point, half, route.incoming);
+
+    try std.testing.expectEqual(expected_front.depth, front.depth);
+    try std.testing.expectEqual(expected_front.angle, front.angle);
+    try std.testing.expectEqual(expected_incoming.depth, incoming.depth);
+    try std.testing.expectEqual(expected_incoming.angle, incoming.angle);
+}
+
+test "Mandelbrot lane boundaries do not jump across the texture" {
+    const size = dvui.Size.Physical{ .w = 640, .h = 360 };
+    const point = dvui.Point.Physical{ .x = 380, .y = 190 };
+    const offset = dvui.Point.Physical{ .x = point.x - size.w / 2, .y = point.y - size.h / 2 };
+    const mapped = coordinates(.mandelbrot, offset, size.h / 2, 0, false);
+    const base = lens(.{}, .{ .fold = .mandelbrot, .mirrors = 1 }, .{});
+    for (1..128) |boundary| {
+        const lane_count = @as(f32, @floatFromInt(boundary)) / mapped.depth;
+        if (lane_count <= rings_track.min or lane_count >= rings_track.max) continue;
+        var before = base;
+        before.ring_count = lane_count - 0.00001;
+        var after = base;
+        after.ring_count = lane_count + 0.00001;
+        const first = fold(point, before, size, size, &.{});
+        const second = fold(point, after, size, size, &.{});
+        const horizontal = first.x - second.x;
+        const vertical = first.y - second.y;
+        const displacement = @sqrt(horizontal * horizontal + vertical * vertical);
+        try std.testing.expect(displacement < 0.5);
+    }
+}
+
+test "Mandelbrot lane endpoints sample the outer edge" {
+    const size = dvui.Size.Physical{ .w = 100, .h = 100 };
+    const centre = dvui.Point.Physical{ .x = 50, .y = 50 };
+    const half: f32 = 50;
+    var view = lens(.{}, .{ .fold = .mandelbrot, .ring_count = 2, .mirrors = 1 }, .{});
+    view.spin = 0;
+    view.ring_shift = 0;
+    const endpoint = sampleCoordinates(.{ .depth = 0.5, .angle = 0 }, view, size, half);
+    try std.testing.expectApproxEqAbs(half, endpoint.x - centre.x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), endpoint.y - centre.y, 0.001);
+}
+
+test "full Mandelbrot kicks stay local and disabling kick restores the unpulsed sample" {
+    const size = dvui.Size.Physical{ .w = 640, .h = 360 };
+    const point = dvui.Point.Physical{ .x = 380, .y = 190 };
+    const movement_limit = size.h * 0.075;
+    for ([_]f64{ 0, 0.3, 54, 60 }) |time| {
+        for ([_]f32{ rings_track.min, rings_default, rings_track.max }) |lanes| {
+            const shape = FoldShape{ .fold = .mandelbrot, .heart = 1, .mirrors = 1, .ring_count = lanes };
+            const clock = Clock{ .rush = time };
+            const hit = lens(clock, shape, .{});
+            var neutral = hit;
+            neutral.heart = 0;
+            const first = fold(point, hit, size, size, &.{});
+            const second = fold(point, neutral, size, size, &.{});
+            const horizontal = first.x - second.x;
+            const vertical = first.y - second.y;
+            const displacement = @sqrt(horizontal * horizontal + vertical * vertical);
+            try std.testing.expect(displacement < movement_limit);
+            const disabled = lens(clock, shape, .{ .kick = false });
+            try std.testing.expectEqual(second, fold(point, disabled, size, size, &.{}));
+        }
+    }
 }

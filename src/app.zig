@@ -3,7 +3,7 @@
 const std = @import("std");
 const dvui = @import("dvui");
 const audio = @import("audio.zig");
-const dmt = @import("dmt.zig");
+const folding = @import("fold.zig");
 const geom = @import("geom.zig");
 const signal = @import("signal.zig");
 const tap = @import("tap.zig");
@@ -13,6 +13,7 @@ const wave = @import("wave.zig");
 const stages = @import("stages.zig");
 const blurbs = @import("blurbs.zig");
 const wander = @import("wander.zig");
+const fractal_motion = @import("fractal_motion.zig");
 const backdrop_mod = @import("backdrop.zig");
 
 const panel = dvui.Color{ .r = 0x14, .g = 0x14, .b = 0x1f, .a = 0xff };
@@ -88,8 +89,8 @@ pub const App = struct {
     backdrop: backdrop_mod.Backdrop,
     /// Copies of the backdrop across the frame.
     backdrop_tiles: f32 = backdrop_mod.default_tiles,
-    fold_cache: dmt.Cache = .{},
-    clock: dmt.Clock = .{},
+    fold_cache: folding.Cache = .{},
+    clock: folding.Clock = .{},
     elapsed: f64 = 0,
     last_ns: i96 = 0,
     now_ns: i96 = 0,
@@ -99,11 +100,12 @@ pub const App = struct {
     sliders: wander.Values = .{},
     animated: wander.Values = .{},
     wandering: wander.State = .{},
+    fractal: fractal_motion.State = .{},
     virtual_base: ?dvui.Size.Physical = null,
     /// Which pipeline stages are switched on. Every stage has a toggle in the
     /// right panel; the blurb under the window describes the one hovered.
     toggles: stages.Toggles = .{},
-    fold_kind: dmt.Fold = .tunnel,
+    fold_kind: folding.Fold = .tunnel,
     blurb_focus: blurbs.Subject = .{ .stage = .fold },
     /// Set when the GPU painter was created; the fold then runs in a shader.
     painter: ?*gpu.Painter = null, // kept for the CPU comparison run
@@ -302,15 +304,16 @@ pub const App = struct {
         const levels = self.levels;
         // Everything the beat does to the fold hangs off the kick stage, so
         // switching kick off leaves the picture steady against the music.
-        const beat = dmt.beat(levels.low_level, levels.kick, self.animated.kick, self.toggles.kick);
-        const swell = @max(0.2, 1 + beat.pump);
-        const canvas = dmt.virtualSize(self.windowBase(size), self.animated.window * swell);
+        const beat = folding.beat(levels.low_level, levels.kick, self.animated.kick, self.toggles.kick);
+        const fractal = self.fractal.values;
+        const swell = if (fractal != null) 1 else @max(0.2, 1 + beat.pump);
+        const canvas = folding.virtualSize(self.windowBase(size), self.animated.window * swell);
         // The fold samples the frame where the screen point lands, so no axis
         // swap.
-        const view = dmt.lens(self.clock, .{
-            .ring_count = std.math.clamp(self.animated.lanes + beat.rings, dmt.rings_track.min, dmt.rings_track.max),
-            .heart = self.levels.kick,
-            .pump = self.animated.kick,
+        const view = folding.lens(self.clock, .{
+            .ring_count = if (fractal) |motion| motion.lanes else std.math.clamp(self.animated.lanes + beat.rings, folding.rings_track.min, folding.rings_track.max),
+            .heart = if (fractal) |motion| motion.kick else levels.kick,
+            .pump = if (fractal != null) 1 else self.animated.kick,
             .mirrors = self.animated.mirror,
             .fold = self.fold_kind,
         }, self.toggles);
@@ -320,7 +323,7 @@ pub const App = struct {
                 self.setError(@errorName(err));
             };
         } else if (fold) {
-            dmt.draw(texture, arena, &self.fold_cache, view, size, canvas, stills) catch {
+            folding.draw(texture, arena, &self.fold_cache, view, size, canvas, stills) catch {
                 self.setError("the fold could not be drawn");
             };
         } else {
@@ -546,8 +549,7 @@ pub const App = struct {
         }
     }
 
-    /// The fold's radial law, one entry per law, each with its own blurb while
-    /// the menu is open.
+    /// The fold mappings, with descriptions while the menu is open.
     fn lawPicker(self: *App, id: u32) void {
         var picker: dvui.DropdownWidget = undefined;
         picker.init(@src(), .{
@@ -563,16 +565,14 @@ pub const App = struct {
         defer picker.deinit();
 
         if (!picker.dropped()) return;
-        inline for (@typeInfo(dmt.Fold).@"enum".field_values) |value| {
-            const law: dmt.Fold = @fromBackingInt(@intCast(value));
+        inline for (@typeInfo(folding.Fold).@"enum".field_values) |value| {
+            const law: folding.Fold = @fromBackingInt(@intCast(value));
             var item = picker.addChoice();
             defer item.deinit();
             dvui.labelNoFmt(@src(), blurbs.lawLabel(law), .{}, item.data().options.strip().override(item.style()));
 
             if (item.mouse_over) self.blurb_focus = .{ .law = law };
             if (item.activeRect() != null) {
-                // Branches is the fold without a mirror, so picking it drops
-                // the facets rather than leaving a tick that cannot show.
                 self.fold_kind = law;
                 picker.close();
             }
@@ -822,11 +822,7 @@ pub const App = struct {
         self.last_ns = now;
         const step = @min(seconds, 0.1);
         self.elapsed += step;
-        // The tunnel keeps moving through silence; only its speed follows the
-        // capture.
-        self.animated = self.wandering.apply(self.sliders, self.elapsed);
-        const beat = dmt.beat(self.levels.low_level, self.levels.kick, self.animated.kick, self.toggles.kick);
-        self.clock.advance(step * self.animated.speed * beat.pace, dmt.mood(self.elapsed));
+        self.advanceAnimation(step);
 
         const ring = if (self.ring) |*value| value else return;
         const before = ring.pushes;
@@ -848,6 +844,16 @@ pub const App = struct {
         const newest = signal.column(ring, samples.len - tail, samples.len, 0);
 
         self.levels.update(newest, @floatCast(step));
+    }
+
+    fn advanceAnimation(self: *App, seconds: f64) void {
+        self.animated = self.wandering.apply(self.sliders, self.elapsed);
+        self.fractal.update(@floatCast(seconds), if (self.fold_kind == .mandelbrot) .{
+            .lanes = self.animated.lanes,
+            .kick = if (self.toggles.kick) self.levels.kick * self.animated.kick else 0,
+        } else null);
+        const pace = if (self.fold_kind == .mandelbrot) 1 else folding.beat(self.levels.low_level, self.levels.kick, self.animated.kick, self.toggles.kick).pace;
+        self.clock.advance(seconds * self.animated.speed * pace, folding.mood(self.elapsed));
     }
 
     /// A loopback driver that stops feeding looks exactly like silence: the

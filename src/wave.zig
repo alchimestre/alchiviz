@@ -478,7 +478,7 @@ test "maximum gate leaves dense input thin after all source processing" {
         for (0..96000) |index| ring.push(if (index % 2 == 0) level else -level);
         for ([_]f32{ 0, 1 }) |blur| {
             const open = try prepare(arena.allocator(), &ring, blur, 240, 0);
-            const gated = try prepare(arena.allocator(), &ring, blur, 240, @import("dmt.zig").gate_track.max);
+            const gated = try prepare(arena.allocator(), &ring, blur, 240, @import("fold.zig").gate_track.max);
             for (open, gated) |before, after| {
                 try std.testing.expectApproxEqAbs(@as(f32, 1), before.peak, 0.00001);
                 try std.testing.expect(after.peak > 0);
