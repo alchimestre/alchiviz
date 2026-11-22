@@ -20,18 +20,6 @@ const PropertyAddress = extern struct {
     element: u32,
 };
 
-const AudioStreamBasicDescription = extern struct {
-    sample_rate: f64,
-    format_id: u32,
-    format_flags: u32,
-    bytes_per_packet: u32,
-    frames_per_packet: u32,
-    bytes_per_frame: u32,
-    channels_per_frame: u32,
-    bits_per_channel: u32,
-    reserved: u32,
-};
-
 const AudioBuffer = extern struct {
     channels: u32,
     byte_size: u32,
@@ -58,11 +46,7 @@ const scope_global: u32 = fromFourCC("glob");
 const devices_selector: u32 = fromFourCC("dev#");
 const uid_selector: u32 = fromFourCC("uid ");
 const default_output_selector: u32 = fromFourCC("dOut");
-const format_selector: u32 = fromFourCC("tfmt");
 const kCFStringEncodingUTF8: u32 = 0x0800_0100;
-const kAudioFormatLinearPCM: u32 = fromFourCC("lpcm");
-const kAudioFormatFlagIsFloat: u32 = 1 << 0;
-const kAudioFormatFlagIsPacked: u32 = 1 << 3;
 
 extern fn AudioObjectGetPropertyDataSize(object: AudioObjectID, address: *const PropertyAddress, qualifier_size: u32, qualifier: ?*const anyopaque, out: *u32) OSStatus;
 extern fn AudioObjectGetPropertyData(object: AudioObjectID, address: *const PropertyAddress, qualifier_size: u32, qualifier: ?*const anyopaque, io: *u32, out: ?*anyopaque) OSStatus;
@@ -198,7 +182,6 @@ pub fn start(io: std.Io, allocator: std.mem.Allocator) !SystemTap {
     if (AudioHardwareCreateProcessTap(description, &tap_id) != 0 or tap_id == 0)
         return error.TapDenied;
     errdefer _ = AudioHardwareDestroyProcessTap(tap_id);
-
 
     const uuid = try tapUUID(description);
     const output = defaultOutputUid() orelse return error.NoOutputDevice;
