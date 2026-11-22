@@ -117,7 +117,6 @@ fn run(init: std.process.Init, device: ?[]const u8, backdrop: backdrop_mod.Optio
         app.frame();
         const frame_end = try win.end(.{});
 
-
         // dvui has no animation to wait for, so this wait is what paces the
         // waveform. It has to be the part of the frame budget the frame has
         // not already spent: a full-frame wait on top of a 12 ms frame lands
