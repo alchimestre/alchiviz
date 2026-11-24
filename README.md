@@ -72,7 +72,7 @@ Use `continuous` in the right panel to compare connected bands with endpoint wra
 | stage | what it does | off |
 |---|---|---|
 | `fold` | maps the window back into the frame through the selected mapping | the capture, flat |
-| `continuous` | samples connected bands, reflects alternate bands and skips per-lane rotation | wraps the full-reach endpoint to the centre and rotates each lane |
+| `continuous` | keeps the full-reach endpoint of each band and skips per-lane rotation | wraps the full-reach endpoint to the centre and rotates each lane |
 | `spin` | turns the sampling frame with the clock | fixed frame |
 | `mirrors` | kaleidoscope facets, count from the `mirror` slider | one unfolded sample |
 | `kick` | everything the beat does: pushes the rings out, adds lanes, widens the window, hurries the clock | the fold stops moving with the music |
