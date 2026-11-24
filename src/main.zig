@@ -59,10 +59,10 @@ fn run(init: std.process.Init, device: ?[]const u8, backdrop: backdrop_mod.Optio
     var app = try App.init(init.gpa, init.io, init.environ_map, device, backdrop);
 
     if (device) |needle| {
-        if (app.devices.len > 0 and audio.find(app.devices, needle) == null) {
+        if (app.names.len > 0 and audio.find(app.devices, needle) == null) {
             std.debug.print("no recording device matches \"{s}\"; using {s}\n", .{
                 needle,
-                app.devices[app.selected].name,
+                app.names[app.selected],
             });
         }
     }

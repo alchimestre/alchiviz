@@ -357,9 +357,9 @@ pub fn apply(bindings: *Bindings, message: Message, sink: Sink, now_ms: i64) boo
             .stage => |stage| sink.toggles.set(stage, on),
             // A fold is a choice, not a switch: pressing its pad picks it.
             .law => |law| sink.law.* = law,
-            // A command has no state to flip, so only a press counts.
+            // A toggle pad alternates 127 and 0, so each of its messages is a press.
             .command => |command| {
-                if (message.value < 64) continue;
+                if (binding.mode != .toggle and message.value < 64) continue;
                 sink.commands.insert(command);
             },
         }
@@ -441,12 +441,14 @@ fn parseTarget(tokens: *std.mem.TokenIterator(u8, .any)) ?Target {
     return .{ .knob = std.meta.stringToEnum(wander.Parameter, token) orelse return null };
 }
 
+const max_config_bytes = 1 << 20;
+
 pub fn load(allocator: std.mem.Allocator, environ: *const std.process.Environ.Map, io: std.Io) Bindings {
     var bindings: Bindings = .{};
-    var content: [4096]u8 = undefined;
     var path_buffer: [1024]u8 = undefined;
     const path = configPath(environ, &path_buffer) orelse return bindings;
-    const text = std.Io.Dir.cwd().readFile(io, path, &content) catch return bindings;
+    const text = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_config_bytes)) catch return bindings;
+    defer allocator.free(text);
 
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw| {
@@ -470,7 +472,10 @@ pub fn save(allocator: std.mem.Allocator, io: std.Io, path: []const u8, bindings
     if (std.fs.path.dirname(path)) |directory| {
         try std.Io.Dir.cwd().createDirPath(io, directory);
     }
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = text });
+    var atomic = try std.Io.Dir.cwd().createFileAtomic(io, path, .{ .replace = true });
+    defer atomic.deinit(io);
+    try atomic.file.writeStreamingAll(io, text);
+    try atomic.replace(io);
 }
 
 /// One line for the menu when a bind or a write failed.
@@ -780,14 +785,30 @@ fn read(list: [*c]const c.MIDIPacketList, ref: ?*anyopaque, connection: ?*anyopa
     while (index < c.alchiviz_midi_packet_count(list)) : (index += 1) {
         const length = @min(@as(usize, c.alchiviz_midi_packet_length(packet)), 256);
         const bytes = c.alchiviz_midi_packet_bytes(packet)[0..length];
-        // The header promises no running status, so every message is whole and
-        // three bytes wide.
-        var offset: usize = 0;
-        while (offset + 3 <= bytes.len) : (offset += 3) {
-            if (parseMessage(bytes[offset..][0..3])) |message| queue.push(message);
-        }
+        queueMessages(queue, bytes);
         packet = c.alchiviz_midi_packet_next(packet);
     }
+}
+
+/// Walk one packet message by message. CoreMIDI forbids running status, so
+/// each message starts with its status byte.
+fn queueMessages(queue: *Queue, bytes: []const u8) void {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const span = messageLength(bytes[offset..]);
+        if (parseMessage(bytes[offset..][0..span])) |message| queue.push(message);
+        offset += span;
+    }
+}
+
+fn messageLength(bytes: []const u8) usize {
+    const span: usize = switch (bytes[0]) {
+        0x80...0xBF, 0xE0...0xEF, 0xF2 => 3,
+        0xC0...0xDF, 0xF1, 0xF3 => 2,
+        0xF0 => if (std.mem.indexOfScalar(u8, bytes, 0xF7)) |end| end + 1 else bytes.len,
+        else => 1,
+    };
+    return @min(span, bytes.len);
 }
 
 /// Channel voice messages only: control changes and notes. Everything else a
@@ -1027,6 +1048,29 @@ test "a toggle pad flips on both of its values" {
     try std.testing.expect(!toggles.spin);
 }
 
+test "a toggle pad fires its command on both of its values" {
+    var bindings: Bindings = .{};
+    defer bindings.deinit(std.testing.allocator);
+    try bindings.put(std.testing.allocator, .{
+        .signature = .{ .kind = .note, .channel = 0, .control = 42 },
+        .target = .{ .command = .fullscreen },
+        .mode = .toggle,
+    });
+    var values: wander.Values = .{};
+    var intensity: f32 = 0;
+    var wandering: std.EnumSet(wander.Parameter) = .empty;
+    var toggles: stages.Toggles = .{};
+    var law: folding.Fold = .tunnel;
+    var commands: Commands = .init(.{});
+    const sink: Sink = .{ .values = &values, .intensity = &intensity, .wandering = &wandering, .toggles = &toggles, .law = &law, .commands = &commands };
+
+    for ([_]u7{ 127, 0 }) |value| {
+        commands = .init(.{});
+        _ = apply(&bindings, .{ .kind = .note, .channel = 0, .control = 42, .value = value }, sink, 0);
+        try std.testing.expect(commands.contains(.fullscreen));
+    }
+}
+
 test "each fold picks its law from its own pad" {
     var bindings: Bindings = .{};
     defer bindings.deinit(std.testing.allocator);
@@ -1212,6 +1256,19 @@ test "three bytes become a control change or a note" {
     try std.testing.expect(parseMessage(&.{ 0xB0, 200, 7 }) == null);
 }
 
+test "a packet is walked message by message whatever their lengths" {
+    var queue: Queue = .{};
+    const packet = [_]u8{ 0xF8, 0xC0, 5, 0xF0, 0x7E, 0x01, 0xF7, 0xB0, 7, 100, 0xD0, 9, 0x90, 60, 127 };
+    queueMessages(&queue, &packet);
+    const cc = queue.pop() orelse return error.LostControl;
+    try std.testing.expectEqual(Kind.cc, cc.kind);
+    try std.testing.expectEqual(@as(u7, 7), cc.control);
+    try std.testing.expectEqual(@as(u7, 100), cc.value);
+    const note = queue.pop() orelse return error.LostNote;
+    try std.testing.expectEqual(@as(u7, 60), note.control);
+    try std.testing.expect(queue.pop() == null);
+}
+
 test "the queue keeps order and drops what it cannot hold" {
     var queue: Queue = .{};
     try std.testing.expect(queue.pop() == null);
@@ -1273,6 +1330,28 @@ test "a saved table reads back" {
         // The file carries the control, not the mode: the target picks the mode.
         try std.testing.expectEqual(defaultMode(binding.target), read_back.mode);
     }
+}
+
+test "a table past four kilobytes still loads its last binding" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var base_buffer: [256]u8 = undefined;
+    const base = try std.fmt.bufPrint(&base_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var environ: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environ.deinit();
+    try environ.put("XDG_CONFIG_HOME", base);
+    var path_buffer: [1024]u8 = undefined;
+    const path = configPath(&environ, &path_buffer) orelse return error.NoConfigPath;
+
+    const text = try std.mem.concat(std.testing.allocator, u8, &.{ &@as([4096]u8, @splat('#')), "\n", "cc 5 = speed\n" });
+    defer std.testing.allocator.free(text);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, std.fs.path.dirname(path).?);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = text });
+
+    var loaded = load(std.testing.allocator, &environ, std.testing.io);
+    defer loaded.deinit(std.testing.allocator);
+    try std.testing.expect(loaded.forTarget(.{ .knob = .speed }) != null);
 }
 
 test "a save that cannot create its directory says so" {

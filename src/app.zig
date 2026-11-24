@@ -173,8 +173,9 @@ pub const App = struct {
         if (tap_slot == 1) names[0] = "system output";
         for (devices, 0..) |device, index| names[index + tap_slot] = device.name;
 
-        const chosen = if (requested) |needle|
-            if (audio.find(devices, needle)) |index| index + tap_slot else 0
+        const found = if (requested) |needle| audio.find(devices, needle) else null;
+        const chosen = if (found) |index|
+            index + tap_slot
         else if (tap_slot == 1)
             0
         else

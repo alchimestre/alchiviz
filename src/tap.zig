@@ -148,6 +148,7 @@ pub const SystemTap = struct {
     tap: AudioObjectID,
     proc: AudioDeviceIOProcID,
     queue: *Queue,
+    agc: signal.Agc = .{},
 
     /// Close the capture and give back everything it allocated. The io proc is
     /// stopped first: destroying the device under a running proc crashes.
@@ -169,7 +170,7 @@ pub const SystemTap = struct {
         while (true) {
             const taken = self.queue.pop(&buffer);
             if (taken == 0) return;
-            for (buffer[0..taken]) |sample| ring.push(sample);
+            for (buffer[0..taken]) |sample| ring.push(self.agc.process(sample, sample_rate));
         }
     }
 };
