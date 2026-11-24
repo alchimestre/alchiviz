@@ -27,9 +27,6 @@ fn copyError() void {
 pub const Uniforms = extern struct {
     size: [2]f32,
     canvas: [2]f32,
-    still_min: [3][2]f32,
-    still_max: [3][2]f32,
-    still_count: f32,
     ring_count: f32,
     heart: f32,
     kick_push: f32,
@@ -39,7 +36,6 @@ pub const Uniforms = extern struct {
     spin_rate: f32,
     spin: f32,
     ring_shift: f32,
-    calm: f32,
     fold_kind: f32,
     continuous: f32,
     zoom_phase: f32,
@@ -124,9 +120,6 @@ const fragment_source = std.fmt.comptimePrint(
     \\struct Uniforms {
     \\    float2 size;
     \\    float2 canvas;
-    \\    float2 still_min[3];
-    \\    float2 still_max[3];
-    \\    float still_count;
     \\    float ring_count;
     \\    float heart;
     \\    float kick_push;
@@ -136,7 +129,6 @@ const fragment_source = std.fmt.comptimePrint(
     \\    float spin_rate;
     \\    float spin;
     \\    float ring_shift;
-    \\    float calm;
     \\    float fold_kind;
     \\    float continuous;
     \\    float zoom_phase;
@@ -154,18 +146,6 @@ const fragment_source = std.fmt.comptimePrint(
     \\    if (folded < 0.0) folded += period;
     \\    if (folded > extent) folded = extent * 2.0 - folded;
     \\    return folded;
-    \\}
-    \\
-    \\static float still_strength(float2 p, constant Uniforms &u) {
-    \\    float strength = 1.0;
-    \\    for (int i = 0; i < 3; ++i) {
-    \\        if (float(i) >= u.still_count) break;
-    \\        float dx = max(max(u.still_min[i].x - p.x, p.x - u.still_max[i].x), 0.0);
-    \\        float dy = max(max(u.still_min[i].y - p.y, p.y - u.still_max[i].y), 0.0);
-    \\        float t = clamp(sqrt(dx * dx + dy * dy) / u.calm, 0.0, 1.0);
-    \\        strength = min(strength, t * t * (3.0 - 2.0 * t));
-    \\    }
-    \\    return strength;
     \\}
     \\
     \\static float2 complex_multiply(float2 left, float2 right) {
@@ -226,8 +206,6 @@ const fragment_source = std.fmt.comptimePrint(
     \\}
     \\
     \\static float2 bend(float2 p, constant Uniforms &u, bool incoming) {
-    \\    float strength = still_strength(p, u);
-    \\    if (strength <= 0.0) return p;
     \\    float2 centre = u.size * 0.5;
     \\    float2 q = p - centre;
     \\    float half_min = min(u.canvas.x, u.canvas.y) * 0.5;
@@ -242,8 +220,7 @@ const fragment_source = std.fmt.comptimePrint(
     \\    float eased = within * within * (3.0 - 2.0 * within);
     \\    float parity = fmod(level, 2.0);
     \\    if (parity < 0.0) parity += 2.0;
-    \\    float band = u.fold_kind > 1.5 && u.fold_kind < 2.5 && u.continuous < 0.5
-    \\        ? eased : (parity < 1.0 ? eased : 1.0 - eased);
+    \\    float band = parity < 1.0 ? eased : 1.0 - eased;
     \\
     \\    float turned_angle = mapped.y + u.turn_phase * u.spin_rate + depth * u.ring_shift;
     \\    float angle = turned_angle;
@@ -266,7 +243,7 @@ const fragment_source = std.fmt.comptimePrint(
     \\    float2 source = centre + float2(local.x * cos(turned) - local.y * sin(turned),
     \\                                    local.x * sin(turned) + local.y * cos(turned));
     \\    float2 wrapped = float2(bounced(source.x, u.size.x), bounced(source.y, u.size.y));
-    \\    return mix(p, wrapped, strength);
+    \\    return wrapped;
     \\}
     \\
     \\fragment float4 main0(VertexOut in [[stage_in]],
@@ -386,22 +363,11 @@ pub const Painter = struct {
     pub fn pack(
         size: dvui.Size.Physical,
         canvas: dvui.Size.Physical,
-        stills: []const dvui.Rect.Physical,
         lens: folding.Lens,
     ) Uniforms {
-        var still_min: [3][2]f32 = @splat(.{ 0, 0 });
-        var still_max: [3][2]f32 = @splat(.{ 0, 0 });
-        const count = @min(stills.len, still_min.len);
-        for (stills[0..count], 0..) |rect, at| {
-            still_min[at] = .{ rect.x, rect.y };
-            still_max[at] = .{ rect.x + rect.w, rect.y + rect.h };
-        }
         return .{
             .size = .{ size.w, size.h },
             .canvas = .{ canvas.w, canvas.h },
-            .still_min = still_min,
-            .still_max = still_max,
-            .still_count = @floatFromInt(count),
             .ring_count = lens.ring_count,
             .heart = lens.heart,
             .kick_push = lens.kick_push,
@@ -411,7 +377,6 @@ pub const Painter = struct {
             .spin_rate = lens.spin_rate,
             .spin = lens.spin,
             .ring_shift = lens.ring_shift,
-            .calm = lens.calm,
             .fold_kind = switch (lens.fold) {
                 .tunnel => 1,
                 .rings => 2,

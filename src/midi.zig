@@ -495,6 +495,10 @@ pub fn configPath(environ: *const std.process.Environ.Map, buffer: []u8) ?[]cons
     return std.fmt.bufPrint(buffer, "{s}/.config/alchiviz/midi.conf", .{home}) catch null;
 }
 
+/// A destination must share more than this many name characters with a source.
+const min_shared_prefix: usize = 7;
+const resolve_retry_ms: i64 = 1000;
+
 /// The open CoreMIDI client and its input port. A controller plugged in after
 /// startup needs a restart, which the menu says.
 pub const Input = struct {
@@ -506,6 +510,9 @@ pub const Input = struct {
     destination: c.MIDIEndpointRef = 0,
     destination_name: [96]u8 = undefined,
     destination_len: usize = 0,
+    /// When the destination search last came up empty, so a missing controller
+    /// is not looked for again on every light.
+    resolve_tried_ms: ?i64 = null,
     /// The sources the port listens to. The lights take their destination from
     /// these, so they are set before any message has arrived.
     source_refs: [32]c.MIDIEndpointRef = @splat(0),
@@ -644,7 +651,13 @@ pub const Input = struct {
     /// light it never set.
     pub fn send(self: *Input, signature: Signature, colour: Colour, now_ms: i64) bool {
         if (!self.started or self.output == 0) return false;
-        self.resolveDestination();
+        if (self.destination == 0) {
+            if (self.resolve_tried_ms) |tried| {
+                if (now_ms - tried < resolve_retry_ms) return false;
+            }
+            self.resolve_tried_ms = now_ms;
+            self.resolveDestination();
+        }
         if (self.destination == 0) return false;
 
         const channel = signature.channel orelse 0;
@@ -696,7 +709,7 @@ pub const Input = struct {
         if (origin_count == 0) return;
 
         var best: c.MIDIEndpointRef = 0;
-        var best_shared: usize = 7;
+        var best_shared: usize = min_shared_prefix;
         var best_name: [96]u8 = undefined;
         var best_name_len: usize = 0;
         const count = c.MIDIGetNumberOfDestinations();

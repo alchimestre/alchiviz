@@ -20,6 +20,15 @@ Pass arguments through to the binary:
 zig build run -- --device "eqMac Export"
 ```
 
+Build options:
+
+| Option | Effect |
+|---|---|
+| `-Doptimize=<mode>` | `debug`, `safe`, `fast` (default) or `small` |
+| `-Dsdl3-prefix=<path>` | SDL3 install to link; default is `brew --prefix sdl3` |
+
+`zig build test` always builds with safety checks on.
+
 ## Picture
 
 The capture is drawn as terrain: eighteen depth layers of the same waveform,
@@ -196,3 +205,12 @@ zig build test
 | `src/fold.zig` | the fold, its clock and its mesh |
 | `src/mandelbrot.zig` | boundary-region reference orbits and zoom route |
 | `src/geom.zig` | triangle grid helpers |
+| `src/gpu.zig` | the fold as a Metal fragment shader |
+| `src/stages.zig` | the stage toggles and their descriptions |
+| `src/blurbs.zig` | the bottom blurb for the hovered control |
+| `src/keys.zig` | the keybind file |
+| `src/wander.zig` | the sliders' parameters, values and wander state |
+| `src/fractal_motion.zig` | the lane and kick motion while mandelbrot runs |
+| `src/backdrop.zig`, `src/image.zig` | the `--backdrop` tiling and image decode |
+| `src/midi.h`, `src/sdl.h` | C headers for CoreMIDI and SDL3 |
+| `src/tests.zig` | the test root |

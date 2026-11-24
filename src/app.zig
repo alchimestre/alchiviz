@@ -24,10 +24,6 @@ const muted = dvui.Color{ .r = 0x8a, .g = 0x8a, .b = 0x9e, .a = 0xff };
 const toggle_width: f32 = 24;
 const value_width: f32 = 38;
 
-fn maybeStills(hidden: bool, stills: []const dvui.Rect.Physical) []const dvui.Rect.Physical {
-    return if (hidden) &.{} else stills;
-}
-
 /// One swatch of the colour bar. Explicit rect, so the cells stack over each
 /// other instead of taking positions from the box's layout.
 fn paintCell(id: u32, extra: u32, rect: struct { x: f32, w: f32, h: f32 }, colour: wave.Color) void {
@@ -113,7 +109,7 @@ pub const App = struct {
     fold_kind: folding.Fold = .tunnel,
     blurb_focus: blurbs.Subject = .{ .stage = .fold },
     /// Set when the GPU painter was created; the fold then runs in a shader.
-    painter: ?*gpu.Painter = null, // kept for the CPU comparison run
+    painter: ?*gpu.Painter = null,
     gpu_message: ?[]const u8 = null,
     gpu_frame: GpuFrame = .{},
     /// True while the panel is out of the way; the bind that flips it comes
@@ -355,7 +351,7 @@ pub const App = struct {
             .fold = self.fold_kind,
         }, self.toggles);
         if (gpu_fold) {
-            const values = gpu.Painter.pack(size, canvas, maybeStills(self.ui_hidden, stills), view);
+            const values = gpu.Painter.pack(size, canvas, view);
             self.painter.?.paintOpaque(self.gpu_frame.cmd, self.gpu_frame.swapchain, texture, values) catch |err| {
                 self.setError(@errorName(err));
             };
