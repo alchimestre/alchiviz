@@ -14,7 +14,7 @@ pub const Binds = struct {
 
 pub const template =
     \\# alchiviz keybinds: one "key = action" per line.
-    \\# Keys are the names dvui uses: a to z, 0 to 9, escape, space, f1 to f12.
+    \\# Keys are the names dvui uses: a to z, zero to nine, escape, space, f1 to f25.
     \\# Actions: toggle-ui.
     \\h = toggle-ui
     \\

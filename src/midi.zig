@@ -306,11 +306,11 @@ pub const header =
     \\
 ;
 
-/// The values a binding writes. Separate from the widgets so a mapping can be
-/// tested without a window.
 /// Commands a message asked for, drained by the app once per frame.
 pub const Commands = std.EnumSet(Target.Command);
 
+/// The values a binding writes. Separate from the widgets so a mapping can be
+/// tested without a window.
 pub const Sink = struct {
     values: *wander.Values,
     intensity: *f32,
@@ -832,8 +832,6 @@ pub fn parseMessage(bytes: []const u8) ?Message {
     };
 }
 
-/// The endpoint's display name, copied into `buffer`. Returns its length, or
-/// null when the framework has no name for it.
 /// Leading bytes two endpoint names share, so a source is paired with the
 /// destination of the same device.
 fn commonPrefix(a: []const u8, b: []const u8) usize {
@@ -843,6 +841,8 @@ fn commonPrefix(a: []const u8, b: []const u8) usize {
     return index;
 }
 
+/// The endpoint's display name, copied into `buffer`. Returns its length, or
+/// null when the framework has no name for it.
 fn displayName(endpoint: c.MIDIEndpointRef, buffer: []u8) ?usize {
     var text: c.CFStringRef = null;
     if (c.MIDIObjectGetStringProperty(endpoint, c.kMIDIPropertyDisplayName, &text) != 0 or text == null) return null;
@@ -1318,6 +1318,11 @@ test "a saved table reads back" {
         .target = .intensity,
         .mode = .latch,
     });
+    try bindings.put(std.testing.allocator, .{
+        .signature = .{ .kind = .note, .channel = 0, .control = 42 },
+        .target = .{ .stage = .fold },
+        .mode = .toggle,
+    });
     try save(std.testing.allocator, std.testing.io, path, &bindings);
 
     var loaded = load(std.testing.allocator, &environ, std.testing.io);
@@ -1327,8 +1332,9 @@ test "a saved table reads back" {
     for (bindings.list.items) |binding| {
         const read_back = loaded.forTarget(binding.target) orelse return error.LostBinding;
         try std.testing.expectEqual(binding.signature, read_back.signature);
-        // The file carries the control, not the mode: the target picks the mode.
-        try std.testing.expectEqual(defaultMode(binding.target), read_back.mode);
+        // Continuous targets pick the mode; switches keep the one in the file.
+        const expected_mode = if (binding.target.continuous()) defaultMode(binding.target) else binding.mode;
+        try std.testing.expectEqual(expected_mode, read_back.mode);
     }
 }
 
